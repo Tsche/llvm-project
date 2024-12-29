@@ -4829,3 +4829,39 @@ def ConstexprExceptionRefcountDec: LangBuiltin<"CXX_LANG"> {
   let Attributes = [NoThrow, Constexpr];
   let Prototype = "void(void *)";
 }
+
+def ConstevalPointsToDynamicAllocation: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_dynamic_allocation"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}
+
+def ConstevalPointsToLocal: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_local"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}
+
+def ConstevalPointsToTypeInfo: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_type_info"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}
+
+def ConstevalPointsToGlobal: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_global"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}
+
+def ConstevalPointsToConstexpr: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_constexpr"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}
+
+def ConstevalPointsToPastEnd: LangBuiltin<"CXX_LANG"> {
+  let Spellings = ["__consteval_points_to_past_end"];
+  let Attributes = [NoThrow, Consteval];
+  let Prototype = "bool(void const *)";
+}

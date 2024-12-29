@@ -12641,6 +12641,73 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
   default:
     return false;
 
+  case Builtin::BI__consteval_points_to_dynamic_allocation: {
+    LValue LV;
+    if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+      return false;
+    }
+  
+    const auto Base = LV.getLValueBase();
+    return Success((bool)Base.dyn_cast<DynamicAllocLValue>(), E);
+  }
+  case Builtin::BI__consteval_points_to_local: {
+    LValue LV;
+    if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+      return false;
+    }
+  
+    const auto Base = LV.getLValueBase();
+    if (const auto *VD = dyn_cast_or_null<VarDecl>(Base.dyn_cast<const ValueDecl *>())) {
+      return Success(VD->isLocalVarDeclOrParm(), E);
+    }
+    
+    return Success(false, E);
+  }
+  case Builtin::BI__consteval_points_to_type_info: {
+    return false;
+    //LValue LV;
+    //if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+    //  return false;
+    //}
+    //
+    //const auto Base = LV.getLValueBase();
+    //return Success((bool)Base.dyn_cast<const TypeInfoLValue *>(), E);
+  }
+  case Builtin::BI__consteval_points_to_global: {
+    LValue LV;
+    if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+      return false;
+    }
+  
+    const auto Base = LV.getLValueBase();
+    if (const auto *VD = dyn_cast_or_null<VarDecl>(Base.dyn_cast<const ValueDecl *>())) {
+      return Success(VD->isFileVarDecl(), E);
+    }
+    
+    return Success(false, E);
+  }
+  case Builtin::BI__consteval_points_to_constexpr: {
+    LValue LV;
+    if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+      return false;
+    }
+  
+    const auto Base = LV.getLValueBase();
+    
+    if (const auto *VD = dyn_cast_or_null<VarDecl>(Base.dyn_cast<const ValueDecl *>())) {
+      return Success(VD->isConstexpr(), E);
+    }
+    
+    return Success(false, E);
+  }
+  case Builtin::BI__consteval_points_to_past_end: {
+    LValue LV;
+    if (!EvaluatePointer(E->getArg(0), LV, Info)) {
+      return false;
+    }
+  
+    return Success(LV.getLValueDesignator().isOnePastTheEnd(), E);
+  }
   case Builtin::BI__builtin_dynamic_object_size:
   case Builtin::BI__builtin_object_size: {
     // The type was checked when we built the expression.
