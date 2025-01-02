@@ -191,6 +191,11 @@ void InterpFrame::describe(llvm::raw_ostream &OS) const {
   OS << ")";
 }
 
+bool InterpFrame::isTailCall() const {
+  // TODO tail recursion in the byte interpreter too?
+  return false;
+}
+
 Frame *InterpFrame::getCaller() const {
   if (Caller->Caller)
     return Caller;

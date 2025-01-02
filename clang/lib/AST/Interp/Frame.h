@@ -37,6 +37,9 @@ public:
 
   /// Returns the called function's declaration.
   virtual const FunctionDecl *getCallee() const = 0;
+  
+  /// Returns if this call was tail-recursive
+  virtual bool isTailCall() const = 0;
 };
 
 } // namespace interp

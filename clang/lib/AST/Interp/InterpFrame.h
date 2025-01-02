@@ -50,6 +50,9 @@ public:
 
   /// Describes the frame with arguments for diagnostic purposes.
   void describe(llvm::raw_ostream &OS) const override;
+  
+  /// Describes if the call was tail recursive
+  bool isTailCall() const override;
 
   /// Returns the parent frame object.
   Frame *getCaller() const override;

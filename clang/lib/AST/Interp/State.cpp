@@ -157,6 +157,6 @@ void State::addCallStack(unsigned Limit) {
     F->describe(Out);
     if (!Buffer.empty())
       addDiag(CallRange.getBegin(), diag::note_constexpr_call_here)
-          << Out.str() << CallRange;
+          << F->isTailCall() << Out.str() << CallRange;
   }
 }

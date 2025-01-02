@@ -259,7 +259,7 @@ def note_constexpr_stmt_expr_unsupported : Note<
 def note_constexpr_calls_suppressed : Note<
   "(skipping %0 call%s0 in backtrace; use -fconstexpr-backtrace-limit=0 to "
   "see all)">;
-def note_constexpr_call_here : Note<"in call to '%0'">;
+def note_constexpr_call_here : Note<"in %select{call|tail call}0 to '%1'">;
 def note_constexpr_inherited_ctor_call_here : Note<
   "in implicit initialization for inherited constructor of %0">;
 def note_constexpr_baa_insufficient_alignment : Note<

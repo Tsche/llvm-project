@@ -567,6 +567,9 @@ namespace {
 
     /// Index - The call index of this call.
     unsigned Index;
+    
+    // Was this a tail call? (for diagnostics)
+    bool TailCall;
 
     /// The stack of integers for tracking version numbers for temporaries.
     SmallVector<unsigned, 2> TempVersionStack = {1};
@@ -599,7 +602,7 @@ namespace {
 
     CallStackFrame(EvalInfo &Info, SourceRange CallRange,
                    const FunctionDecl *Callee, const LValue *This,
-                   const Expr *CallExpr, CallRef Arguments);
+                   const Expr *CallExpr, CallRef Arguments, bool TailCall = false);
     ~CallStackFrame();
 
     // Return the temporary for Key whose version number is Version.
@@ -639,6 +642,9 @@ namespace {
     APValue &createParam(CallRef Args, const ParmVarDecl *PVD, LValue &LV);
 
     void describe(llvm::raw_ostream &OS) const override;
+    bool isTailCall() const override {
+      return TailCall;
+    }
 
     Frame *getCaller() const override { return Caller; }
     SourceRange getCallRange() const override { return CallRange; }
@@ -717,6 +723,10 @@ namespace {
     QualType T;
 
   public:
+    const APValue::LValueBase & getBase() const noexcept {
+      return Base;
+    }
+    
     Cleanup(APValue *Val, APValue::LValueBase Base, QualType T,
             ScopeKind Scope)
         : Value(Val, Scope), Base(Base), T(T) {}
@@ -725,6 +735,9 @@ namespace {
     /// given kind of scope.
     bool isDestroyedAtEndOf(ScopeKind K) const {
       return (int)Value.getInt() >= (int)K;
+    }
+    bool isAssociatedWithVersion(unsigned Version) const {
+      return Base.getVersion() == Version;
     }
     bool endLifetime(EvalInfo &Info, bool RunDestructors) {
       if (RunDestructors) {
@@ -905,6 +918,14 @@ namespace {
     
     std::stack<UnrollingExceptionT> UncaughtExceptions;
     std::stack<UnrollingExceptionT> ActiveExceptions;
+    bool MustTailCall{false};
+    
+    struct TailCallT {
+      std::function<bool(APValue &, const LValue *)> call{nullptr};
+      llvm::SmallVector<Cleanup, 16> cleanupStack;
+    };
+    
+    TailCallT TailCall;
     
     /// The number of heap allocations performed so far in this evaluation.
     unsigned NumHeapAllocs = 0;
@@ -1191,6 +1212,17 @@ namespace {
       // Disable the cleanups for lifetime-extended temporaries.
       llvm::erase_if(CleanupStack, [](Cleanup &C) {
         return !C.isDestroyedAtEndOf(ScopeKind::FullExpression);
+      });
+    }
+    
+    void moveOutAndDelayCleanUpForVersion(unsigned Version, llvm::SmallVector<Cleanup, 16> & BackupStack) {
+      llvm::erase_if(CleanupStack, [&](Cleanup &C) {
+        if (C.isAssociatedWithVersion(Version)) {
+          BackupStack.push_back(C);
+          return true;
+        } else {
+          return false;
+        }
       });
     }
 
@@ -1555,10 +1587,10 @@ void SubobjectDesignator::diagnosePointerArithmetic(EvalInfo &Info,
 
 CallStackFrame::CallStackFrame(EvalInfo &Info, SourceRange CallRange,
                                const FunctionDecl *Callee, const LValue *This,
-                               const Expr *CallExpr, CallRef Call)
+                               const Expr *CallExpr, CallRef Call, bool TailCall)
     : Info(Info), Caller(Info.CurrentCall), Callee(Callee), This(This),
       CallExpr(CallExpr), Arguments(Call), CallRange(CallRange),
-      Index(Info.NextCallIndex++) {
+      Index(Info.NextCallIndex++), TailCall(TailCall) {
   Info.CurrentCall = this;
   ++Info.CallStackDepth;
 }
@@ -5233,6 +5265,36 @@ static bool CheckLocalVariableDeclaration(EvalInfo &Info, const VarDecl *VD) {
   return true;
 }
 
+static EvalStmtResult HandleReturnStmt(StmtResult &Result, const ReturnStmt * RE, EvalInfo &Info, bool MustTail) {
+  const Expr *RetExpr = RE->getRetValue();
+  FullExpressionRAII Scope(Info);
+  
+  const bool previousTailCallInfo = Info.MustTailCall;
+  Info.MustTailCall = MustTail;
+  
+  if (RetExpr && RetExpr->isValueDependent()) {
+    EvaluateDependentExpr(RetExpr, Info);
+    // We know we returned, but we don't know what the value is.
+    return ESR_Failed;
+  }
+  
+  // We can't limit by recursion depth in presence of tail calls
+  // so we increment evaluation steps instead
+  if (Info.MustTailCall && !Info.nextStep(RE)) {
+    return ESR_Failed;
+  }
+  
+  if (RetExpr &&
+      !(Result.Slot
+            ? EvaluateInPlace(Result.Value, Info, *Result.Slot, RetExpr)
+            : Evaluate(Result.Value, Info, RetExpr)))
+    return ESR_Failed;
+  
+  Info.MustTailCall = previousTailCallInfo;
+  
+  return Scope.destroy() ? ESR_Returned : ESR_Failed;
+}
+
 // Evaluate a statement.
 static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
                                    const Stmt *S, const SwitchCase *Case) {
@@ -5401,21 +5463,8 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     return ESR_Succeeded;
   }
 
-  case Stmt::ReturnStmtClass: {
-    const Expr *RetExpr = cast<ReturnStmt>(S)->getRetValue();
-    FullExpressionRAII Scope(Info);
-    if (RetExpr && RetExpr->isValueDependent()) {
-      EvaluateDependentExpr(RetExpr, Info);
-      // We know we returned, but we don't know what the value is.
-      return ESR_Failed;
-    }
-    if (RetExpr &&
-        !(Result.Slot
-              ? EvaluateInPlace(Result.Value, Info, *Result.Slot, RetExpr)
-              : Evaluate(Result.Value, Info, RetExpr)))
-      return ESR_Failed;
-    return Scope.destroy() ? ESR_Returned : ESR_Failed;
-  }
+  case Stmt::ReturnStmtClass:
+    return HandleReturnStmt(Result, cast<ReturnStmt>(S), Info, false);
 
   case Stmt::CompoundStmtClass: {
     BlockScopeRAII Scope(Info);
@@ -5691,6 +5740,12 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
           return ESR_Failed;
         }
       }
+    }
+    
+    if (isa<ReturnStmt>(SS)) {
+      const auto attributes = AS->getAttrs();
+      const bool hasMustTail = std::any_of(attributes.begin(), attributes.end(), [](const Attr *attr) { return attr->getKind() == attr::MustTail;});
+      return HandleReturnStmt(Result, cast<ReturnStmt>(SS), Info, hasMustTail);
     }
 
     return EvaluateStmt(Result, Info, SS, Case);
@@ -6395,9 +6450,16 @@ static bool EvaluateCallArg(const ParmVarDecl *PVD, const Expr *Arg,
   // FIXME: For calling conventions that destroy parameters in the callee,
   // should we consider performing destruction when the function returns
   // instead?
-  APValue &V = PVD ? Info.CurrentCall->createParam(Call, PVD, LV)
-                   : Info.CurrentCall->createTemporary(Arg, Arg->getType(),
-                                                       ScopeKind::Call, LV);
+  
+  auto * CurrentCall = Info.CurrentCall;
+  if (Info.MustTailCall) {
+    assert(CurrentCall->Caller); // it must have caller
+    CurrentCall = CurrentCall->Caller;
+  } 
+  
+  APValue &V = PVD ? CurrentCall->createParam(Call, PVD, LV)
+                 : CurrentCall->createTemporary(Arg, Arg->getType(),
+                                                     ScopeKind::Call, LV);
   if (!EvaluateInPlace(V, Info, LV, Arg))
     return false;
 
@@ -6474,11 +6536,31 @@ static bool HandleFunctionCall(SourceLocation CallLoc,
                                const FunctionDecl *Callee, const LValue *This,
                                const Expr *E, ArrayRef<const Expr *> Args,
                                CallRef Call, const Stmt *Body, EvalInfo &Info,
-                               APValue &Result, const LValue *ResultSlot) {
+                               APValue &Result, const LValue *ResultSlot, bool TailResume = false) {
   if (!Info.CheckCallLimit(CallLoc))
     return false;
+  
+  if (Info.MustTailCall) {
+    assert(Info.TailCall.call == nullptr);
+    
+    // backup deleters for stack
+    assert(Info.TailCall.cleanupStack.size() == 0);
+    Info.moveOutAndDelayCleanUpForVersion(Call.Version, Info.TailCall.cleanupStack);
+    Info.TailCall.call = [=, &Info](APValue &RealResult, const LValue *RealResultSlot) {
+      
+      // so they can be destroyed after this call later
+      Info.CleanupStack.insert(Info.CleanupStack.end(), Info.TailCall.cleanupStack.begin(), Info.TailCall.cleanupStack.end());
+      Info.TailCall.cleanupStack.truncate(0);
+      
+      // Call here is already to proper callframe 
+      return HandleFunctionCall(CallLoc, Callee, This, E, Args, Call, Body, Info, RealResult, RealResultSlot, true);
+    };
+    return true;
+  } 
+  
+  Info.TailCall.call = nullptr; // this is not a tail call
 
-  CallStackFrame Frame(Info, E->getSourceRange(), Callee, This, E, Call);
+  CallStackFrame Frame(Info, E->getSourceRange(), Callee, This, E, Call, TailResume);
 
   // For a trivial copy or move assignment, perform an APValue copy. This is
   // essential for unions, where the operations performed by the assignment
@@ -6522,6 +6604,26 @@ static bool HandleFunctionCall(SourceLocation CallLoc,
     Info.FFDiag(Callee->getEndLoc(), diag::note_constexpr_no_return);
   }
   return ESR == ESR_Returned;
+}
+
+static bool HandleTailFunctionCall(EvalInfo &Info, APValue &Result, const LValue *ResultSlot) {
+  // this is when we evaluate tail call, and need to backtrack for a while...
+  if (Info.MustTailCall && Info.TailCall.call != nullptr) {
+    Info.MustTailCall = false;
+    return true;
+  }
+  
+  // if not, we can evaluate tail call, but they tend to create new tail calls ... so loop
+  while (Info.TailCall.call != nullptr) {
+    CallScopeRAII CallScope(Info);
+    if (!Info.TailCall.call(Result, ResultSlot)) {
+      return false;
+    }
+    if (!CallScope.destroy()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// Evaluate a constructor call.
@@ -8133,6 +8235,11 @@ public:
     APValue Result;
     if (!handleCallExpr(E, Result, nullptr))
       return false;
+    if (Info.TailCall.call != nullptr) {
+      // we did a tail call!, this will avoid checking result value
+      // TODO maybe something nicer?
+      return true;
+    }
     return DerivedSuccess(Result, E);
   }
 
@@ -8207,8 +8314,17 @@ public:
       // LHS.
       auto *OCE = dyn_cast<CXXOperatorCallExpr>(E);
       if (OCE && OCE->isAssignmentOp()) {
+        // TODO check if tail-recursion applies here too
         assert(Args.size() == 2 && "wrong number of arguments in assignment");
-        Call = Info.CurrentCall->createCall(FD);
+        
+        // handling tail recursion here
+        auto * CurrentCall = Info.CurrentCall;
+        if (Info.MustTailCall && CurrentCall) {
+          assert(CurrentCall->Caller);
+          CurrentCall = CurrentCall->Caller;
+        }
+        Call = CurrentCall->createCall(FD);
+        
         bool HasThis = false;
         if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
           HasThis = MD->isImplicitObjectMemberFunction();
@@ -8296,7 +8412,12 @@ public:
 
     // Evaluate the arguments now if we've not already done so.
     if (!Call) {
-      Call = Info.CurrentCall->createCall(FD);
+      auto * CurrentCall = Info.CurrentCall;
+      if (Info.MustTailCall && CurrentCall) {
+        assert(CurrentCall->Caller);
+        CurrentCall = CurrentCall->Caller;
+      }
+      Call = CurrentCall->createCall(FD);
       if (!EvaluateArgs(Args, Call, Info, FD))
         return false;
     }
@@ -8340,7 +8461,13 @@ public:
                                          CovariantAdjustmentPath))
       return false;
 
-    return CallScope.destroy();
+    if (!CallScope.destroy()) 
+      return false;
+     
+    if (!HandleTailFunctionCall(Info, Result, ResultSlot))
+      return false;
+    
+    return true;
   }
 
   bool VisitCompoundLiteralExpr(const CompoundLiteralExpr *E) {
