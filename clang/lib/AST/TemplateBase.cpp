@@ -1,5 +1,7 @@
 //===- TemplateBase.cpp - Common template AST class implementation --------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -29,10 +31,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -198,6 +197,13 @@ void TemplateArgument::initFromIntegral(const ASTContext &Ctx,
   Integer.Type = Type.getAsOpaquePtr();
 }
 
+TemplateArgument::TemplateArgument(CXXSpliceSpecifierExpr *Splice,
+                                   bool IsDefaulted) {
+  TypeOrValue.Kind = SpliceSpecifier;
+  TypeOrValue.IsDefaulted = IsDefaulted;
+  TypeOrValue.V = reinterpret_cast<uintptr_t>(Splice);
+}
+
 void TemplateArgument::initFromStructural(const ASTContext &Ctx, QualType Type,
                                           const APValue &V, bool IsDefaulted) {
   Value.Kind = StructuralValue;
@@ -221,8 +227,13 @@ static const ValueDecl *getAsSimpleValueDeclRef(const ASTContext &Ctx,
 
   // We model class non-type template parameters as their template parameter
   // object declaration.
-  if (V.isStruct() || V.isUnion())
+  if (V.isStruct() || V.isUnion()) {
+    // Dependent types are not supposed to be described as
+    // TemplateParamObjectDecls.
+    if (T->isDependentType() || T->isInstantiationDependentType())
+      return nullptr;
     return Ctx.getTemplateParamObjectDecl(T, V);
+  }
 
   // Pointers and references with an empty path use the special 'Declaration'
   // representation.
@@ -259,6 +270,15 @@ TemplateArgument::CreatePackCopy(ASTContext &Context,
 
 TemplateArgumentDependence TemplateArgument::getDependence() const {
   auto Deps = TemplateArgumentDependence::None;
+
+  auto computeFromExpr = [](Expr *E) {
+    auto Deps = toTemplateArgumentDependence(E->getDependence());
+    if (isa<PackExpansionExpr>(E))
+      Deps |= TemplateArgumentDependence::Dependent |
+              TemplateArgumentDependence::Instantiation;
+    return Deps;
+  };
+
   switch (getKind()) {
   case Null:
     llvm_unreachable("Should not have a NULL template argument");
@@ -291,12 +311,11 @@ TemplateArgumentDependence TemplateArgument::getDependence() const {
   case StructuralValue:
     return TemplateArgumentDependence::None;
 
+  case SpliceSpecifier:
+    return computeFromExpr(getAsSpliceSpecifier());
+
   case Expression:
-    Deps = toTemplateArgumentDependence(getAsExpr()->getDependence());
-    if (isa<PackExpansionExpr>(getAsExpr()))
-      Deps |= TemplateArgumentDependence::Dependent |
-              TemplateArgumentDependence::Instantiation;
-    return Deps;
+    return computeFromExpr(getAsExpr());
 
   case Pack:
     for (const auto &P : pack_elements())
@@ -333,6 +352,9 @@ bool TemplateArgument::isPackExpansion() const {
 
   case Expression:
     return isa<PackExpansionExpr>(getAsExpr());
+
+  case SpliceSpecifier:
+    return isa<PackExpansionExpr>(getAsSpliceSpecifier());
   }
 
   llvm_unreachable("Invalid TemplateArgument Kind!");
@@ -356,6 +378,7 @@ QualType TemplateArgument::getNonTypeTemplateArgumentType() const {
   case TemplateArgument::Type:
   case TemplateArgument::Template:
   case TemplateArgument::TemplateExpansion:
+  case TemplateArgument::SpliceSpecifier:
   case TemplateArgument::Pack:
     return QualType();
 
@@ -415,6 +438,11 @@ void TemplateArgument::Profile(llvm::FoldingSetNodeID &ID,
     getAsStructuralValue().Profile(ID);
     break;
 
+  case SpliceSpecifier:
+    // TODO(P2996): Revisit this.
+    getAsSpliceSpecifier()->Profile(ID, Context, true);
+    break;
+
   case Expression:
     getAsExpr()->Profile(ID, Context, true);
     break;
@@ -449,8 +477,12 @@ bool TemplateArgument::structurallyEquals(const TemplateArgument &Other) const {
     return getIntegralType() == Other.getIntegralType() &&
            getAsIntegral() == Other.getAsIntegral();
 
+  case SpliceSpecifier:
+    return false;  // TODO(P2996): Revisit this.
+
   case StructuralValue: {
-    if (getStructuralValueType() != Other.getStructuralValueType())
+    if (getStructuralValueType().getCanonicalType() !=
+        Other.getStructuralValueType().getCanonicalType())
       return false;
 
     llvm::FoldingSetNodeID A, B;
@@ -485,6 +517,7 @@ TemplateArgument TemplateArgument::getPackExpansionPattern() const {
 
   case Declaration:
   case Integral:
+  case SpliceSpecifier:
   case StructuralValue:
   case Pack:
   case Null:
@@ -537,9 +570,10 @@ void TemplateArgument::print(const PrintingPolicy &Policy, raw_ostream &Out,
     Out << "nullptr";
     break;
 
-  case Template:
-    getAsTemplate().print(Out, Policy, TemplateName::Qualified::Fully);
+  case Template: {
+    getAsTemplate().print(Out, Policy);
     break;
+  }
 
   case TemplateExpansion:
     getAsTemplateOrTemplatePattern().print(Out, Policy);
@@ -548,6 +582,10 @@ void TemplateArgument::print(const PrintingPolicy &Policy, raw_ostream &Out,
 
   case Integral:
     printIntegral(*this, Out, Policy, IncludeType);
+    break;
+
+  case SpliceSpecifier:
+    getAsSpliceSpecifier()->printPretty(Out, nullptr, Policy);
     break;
 
   case Expression:
@@ -569,15 +607,6 @@ void TemplateArgument::print(const PrintingPolicy &Policy, raw_ostream &Out,
     break;
   }
 }
-
-void TemplateArgument::dump(raw_ostream &Out) const {
-  LangOptions LO; // FIXME! see also TemplateName::dump().
-  LO.CPlusPlus = true;
-  LO.Bool = true;
-  print(PrintingPolicy(LO), Out, /*IncludeType*/ true);
-}
-
-LLVM_DUMP_METHOD void TemplateArgument::dump() const { dump(llvm::errs()); }
 
 //===----------------------------------------------------------------------===//
 // TemplateArgumentLoc Implementation
@@ -615,6 +644,9 @@ SourceRange TemplateArgumentLoc::getSourceRange() const {
   case TemplateArgument::Integral:
     return getSourceIntegralExpression()->getSourceRange();
 
+  case TemplateArgument::SpliceSpecifier:
+    return getSourceSpliceSpecifierExpression()->getSourceRange();
+
   case TemplateArgument::StructuralValue:
     return getSourceStructuralValueExpression()->getSourceRange();
 
@@ -645,6 +677,10 @@ static const T &DiagTemplateArg(const T &DB, const TemplateArgument &Arg) {
 
   case TemplateArgument::Integral:
     return DB << toString(Arg.getAsIntegral(), 10);
+
+  case TemplateArgument::SpliceSpecifier:
+    // TODO(P2996): Implement this.
+    return DB << "[:splice-specifier:]";
 
   case TemplateArgument::StructuralValue: {
     // FIXME: We're guessing at LangOptions!

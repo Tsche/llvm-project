@@ -35,7 +35,9 @@ namespace clang {
       /// A non-type template parameter, stored as an expression.
       NonType,
       /// A template template argument, stored as a template name.
-      Template
+      Template,
+      /// A splice specifier argument, stored as an expression.
+      SpliceSpecifier,
     };
 
     /// Build an empty template argument.
@@ -87,6 +89,11 @@ namespace clang {
     ParsedTemplateTy getAsTemplate() const {
       assert(Kind == Template && "Not a template template argument");
       return ParsedTemplateTy::getFromOpaquePtr(Arg);
+    }
+
+    CXXSpliceSpecifierExpr *getAsSpliceSpecifier() const {
+      assert(Kind == SpliceSpecifier && "Not a splice specifier argument");
+      return static_cast<CXXSpliceSpecifierExpr*>(Arg);
     }
 
     /// Retrieve the location of the template argument.
@@ -159,7 +166,7 @@ namespace clang {
     SourceLocation TemplateNameLoc;
 
     /// FIXME: Temporarily stores the name of a specialization
-    IdentifierInfo *Name;
+    const IdentifierInfo *Name;
 
     /// FIXME: Temporarily stores the overloaded operator kind.
     OverloadedOperatorKind Operator;
@@ -197,7 +204,7 @@ namespace clang {
     /// appends it to List.
     static TemplateIdAnnotation *
     Create(SourceLocation TemplateKWLoc, SourceLocation TemplateNameLoc,
-           IdentifierInfo *Name, OverloadedOperatorKind OperatorKind,
+           const IdentifierInfo *Name, OverloadedOperatorKind OperatorKind,
            ParsedTemplateTy OpaqueTemplateName, TemplateNameKind TemplateKind,
            SourceLocation LAngleLoc, SourceLocation RAngleLoc,
            ArrayRef<ParsedTemplateArgument> TemplateArgs, bool ArgsInvalid,
@@ -236,7 +243,8 @@ namespace clang {
     TemplateIdAnnotation(const TemplateIdAnnotation &) = delete;
 
     TemplateIdAnnotation(SourceLocation TemplateKWLoc,
-                         SourceLocation TemplateNameLoc, IdentifierInfo *Name,
+                         SourceLocation TemplateNameLoc,
+                         const IdentifierInfo *Name,
                          OverloadedOperatorKind OperatorKind,
                          ParsedTemplateTy OpaqueTemplateName,
                          TemplateNameKind TemplateKind,

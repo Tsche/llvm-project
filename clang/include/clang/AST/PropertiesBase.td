@@ -1,5 +1,7 @@
 //==--- PropertiesBase.td - Baseline definitions for AST properties -------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -39,7 +41,7 @@ class EnumPropertyType<string typeName = ""> : PropertyType<typeName> {}
 /// Supports optional values by using the null representation.
 class RefPropertyType<string className> : PropertyType<className # "*"> {
   let PackOptional =
-    "value ? *value : nullptr";
+    "value.value_or(nullptr)";
   let UnpackOptional =
     "value ? std::optional<" # CXXName # ">(value) : std::nullopt";
 }
@@ -76,11 +78,13 @@ def APValue : PropertyType { let PassByReference = 1; }
 def APValueKind : EnumPropertyType<"APValue::ValueKind">;
 def ArraySizeModifier : EnumPropertyType<"ArraySizeModifier">;
 def AttrKind : EnumPropertyType<"attr::Kind">;
+def Attr : PropertyType<"const Attr *">;
 def AutoTypeKeyword : EnumPropertyType;
 def Bool : PropertyType<"bool">;
 def BuiltinTypeKind : EnumPropertyType<"BuiltinType::Kind">;
 def BTFTypeTagAttr : PropertyType<"const BTFTypeTagAttr *">;
 def CallingConv : EnumPropertyType;
+def Char : CountPropertyType<"char">;
 def DeclarationName : PropertyType;
 def DeclarationNameKind : EnumPropertyType<"DeclarationName::NameKind">;
 def DeclRef : RefPropertyType<"Decl"> { let ConstWhenWriting = 1; }
@@ -117,6 +121,8 @@ def ExtParameterInfo : PropertyType<"FunctionProtoType::ExtParameterInfo">;
 def FixedPointSemantics : PropertyType<"llvm::FixedPointSemantics"> {
   let PassByReference = 1;
 }
+def FunctionEffect : PropertyType<"FunctionEffect">;
+def EffectConditionExpr : PropertyType<"EffectConditionExpr">;
 def Identifier : RefPropertyType<"IdentifierInfo"> { let ConstWhenWriting = 1; }
 def LValuePathEntry : PropertyType<"APValue::LValuePathEntry">;
 def LValuePathSerializationHelper :
@@ -130,10 +136,14 @@ def OverloadedOperatorKind : EnumPropertyType;
 def Qualifiers : PropertyType;
 def QualType : DefaultValuePropertyType;
 def RefQualifierKind : EnumPropertyType;
+def ReflectionKind : EnumPropertyType<"ReflectionKind">;
 def Selector : PropertyType;
 def SourceLocation : PropertyType;
 def StmtRef : RefPropertyType<"Stmt"> { let ConstWhenWriting = 1; }
   def ExprRef : SubclassPropertyType<"Expr", StmtRef>;
+  def CXXSpliceSpecifierExprRef :
+      SubclassPropertyType<"CXXSpliceSpecifierExpr", ExprRef>;
+def SubstTemplateTypeParmTypeFlag : EnumPropertyType;
 def TemplateArgument : PropertyType;
 def TemplateArgumentKind : EnumPropertyType<"TemplateArgument::ArgKind">;
 def TemplateName : DefaultValuePropertyType;
@@ -143,6 +153,7 @@ def UInt32 : CountPropertyType<"uint32_t">;
 def UInt64 : CountPropertyType<"uint64_t">;
 def UnaryTypeTransformKind : EnumPropertyType<"UnaryTransformType::UTTKind">;
 def VectorKind : EnumPropertyType<"VectorKind">;
+def TypeCoupledDeclRefInfo : PropertyType;
 
 def ExceptionSpecInfo : PropertyType<"FunctionProtoType::ExceptionSpecInfo"> {
   let BufferElementTypes = [ QualType ];
@@ -421,6 +432,164 @@ let Class = PropertyTypeCase<APValue, "AddrLabelDiff"> in {
   }
   def : Creator<[{
     return APValue(cast<AddrLabelExpr>(lhs), cast<AddrLabelExpr>(rhs));
+  }]>;
+}
+let Class = PropertyTypeCase<APValue, "Reflection"> in {
+  def : ReadHelper<[{
+    APValue base = node;
+    ReflectionKind baseKind = node.getReflectionKind();
+    {
+      while (base.getReflectionDepth() > 1)
+        base = base.Lower();
+      baseKind = base.getReflectionKind();
+
+      if (base.getReflectionDepth() == 1)
+        base = base.Lower();
+      if (base.isReflection())
+        baseKind = base.getReflectionKind();
+    }
+
+    size_t baseSpecIdx = 0;
+    if (baseKind == ReflectionKind::BaseSpecifier) {
+      CXXBaseSpecifier *specifier = base.getReflectedBaseSpecifier();
+      for (const CXXBaseSpecifier &s : specifier->getDerived()->bases()) {
+        if (&s == specifier)
+          break;
+        ++baseSpecIdx;
+      }
+
+      assert(baseSpecIdx < specifier->getDerived()->getNumBases());
+    }
+
+    ArrayRef<char> baseTdmsNameArray;
+    if (baseKind == ReflectionKind::DataMemberSpec) {
+      TagDataMemberSpec *TDMS = base.getReflectedDataMemberSpec();
+      if (TDMS->Name.has_value())
+        baseTdmsNameArray = ArrayRef(TDMS->Name->data(), TDMS->Name->size());
+    }
+  }]>;
+
+  def : Property<"depth", UInt32> {
+    let Read = [{ node.getReflectionDepth() }];
+  }
+
+  def : Property<"reflectedResultType", QualType> {
+    let Conditional = [{ depth > 0 }];
+    let Read = [{ node.getTypeOfReflectedResult(getASTContext()) }];
+  }
+
+  def : Property<"kind", ReflectionKind> {
+    let Read = [{ baseKind }];
+  }
+
+  def : Property<"baseType", QualType> {
+    let Conditional = [{ kind == ReflectionKind::Type }];
+    let Read = [{ base.getReflectedType() }];
+  }
+  def : Property<"baseAPValue", APValue> {
+    let Conditional = [{ depth > 0 }];
+    let Read = [{ base }];
+  }
+  def : Property<"baseDecl", ValueDeclRef> {
+    let Conditional = [{ kind == ReflectionKind::Declaration }];
+    let Read = [{ base.getReflectedDecl() }];
+  }
+  def : Property<"baseTemplate", TemplateName> {
+    let Conditional = [{ kind == ReflectionKind::Template }];
+    let Read = [{ base.getReflectedTemplate() }];
+  }
+  def : Property<"baseNamespace", DeclRef> {
+    let Conditional = [{ kind == ReflectionKind::Namespace }];
+    let Read = [{ base.getReflectedNamespace() }];
+  }
+  def : Property<"baseBaseSpecDerivedFrom", CXXRecordDeclRef> {
+    let Conditional = [{ kind == ReflectionKind::BaseSpecifier }];
+    let Read = [{ base.getReflectedBaseSpecifier()->getDerived() }];
+  }
+  def : Property<"baseBaseSpecIdx", UInt32> {
+    let Conditional = [{ kind == ReflectionKind::BaseSpecifier }];
+    let Read = [{ baseSpecIdx }];
+  }
+
+  def : Property<"baseTdmsType", QualType> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->Ty }];
+  }
+  def : Property<"baseTdmsHasName", Bool> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->Name.has_value() }];
+  }
+  def : Property<"baseTdmsName", Array<Char>> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ baseTdmsNameArray }];
+  }
+  def : Property<"baseTdmsHasAlignment", Bool> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->Alignment.has_value() }];
+  }
+  def : Property<"baseTdmsAlignment", UInt32> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->Alignment.value_or(0) }];
+  }
+  def : Property<"baseTdmsHasBitWidth", Bool> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->BitWidth.has_value() }];
+  }
+  def : Property<"baseTdmsBitWidth", UInt32> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->BitWidth.value_or(0) }];
+  }
+  def : Property<"baseTdmsNoUniqueAddress", Bool> {
+    let Conditional = [{ kind == ReflectionKind::DataMemberSpec }];
+    let Read = [{ base.getReflectedDataMemberSpec()->NoUniqueAddress }];
+  }
+
+  def : Creator<[{
+    APValue V;
+    switch (kind) {
+    case ReflectionKind::Null:
+      V = APValue(kind, nullptr);
+      break;
+    case ReflectionKind::Type:
+      V = APValue(kind, (*baseType).getAsOpaquePtr());
+      break;
+    case ReflectionKind::Object:
+    case ReflectionKind::Value:
+      V = *baseAPValue;
+      break;
+    case ReflectionKind::Declaration:
+      V = APValue(kind, *baseDecl);
+      break;
+    case ReflectionKind::Template:
+      V = APValue(kind, (*baseTemplate).getAsVoidPointer());
+      break;
+    case ReflectionKind::Namespace:
+      V = APValue(kind, *baseNamespace);
+      break;
+    case ReflectionKind::BaseSpecifier:
+      V = APValue(
+            kind,
+            (*baseBaseSpecDerivedFrom)->bases().begin() + (*baseBaseSpecIdx));
+      break;
+    case ReflectionKind::DataMemberSpec: {
+      TagDataMemberSpec *TDMS = new (ctx) TagDataMemberSpec {};
+      TDMS->Ty = *baseTdmsType;
+      if (*baseTdmsHasName)
+        TDMS->Name = std::string(baseTdmsName->begin(), baseTdmsName->end());
+      if (*baseTdmsHasAlignment)
+        TDMS->Alignment = *baseTdmsAlignment;
+      if (*baseTdmsHasBitWidth)
+        TDMS->BitWidth = *baseTdmsBitWidth;
+      TDMS->NoUniqueAddress = *baseTdmsNoUniqueAddress;
+
+      V = APValue(kind, TDMS);
+    }
+    }
+
+    for (unsigned k = 0; k < depth; ++k)
+      V = V.Lift(*reflectedResultType);
+
+    return V;
   }]>;
 }
 let Class = PropertyTypeCase<APValue, "MemberPointer"> in {
@@ -749,6 +918,23 @@ let Class = PropertyTypeCase<TemplateName, "SubstTemplateTemplateParmPack"> in {
     return ctx.getSubstTemplateTemplateParmPack(argumentPack, associatedDecl, index, final);
   }]>;
 }
+let Class = PropertyTypeCase<TemplateName, "DeducedTemplate"> in {
+  def : ReadHelper<[{
+    auto DTS = node.getAsDeducedTemplateName();
+  }]>;
+  def : Property<"underlying", TemplateName> {
+    let Read = [{ DTS->getUnderlying() }];
+  }
+  def : Property<"startPos", UInt32> {
+    let Read = [{ DTS->getDefaultArguments().StartPos }];
+  }
+  def : Property<"defaultArgs", Array<TemplateArgument>> {
+    let Read = [{ DTS->getDefaultArguments().Args }];
+  }
+  def : Creator<[{
+    return ctx.getDeducedTemplateName(underlying, {startPos, defaultArgs});
+  }]>;
+}
 
 // Type cases for TemplateArgument.
 def : PropertyTypeKind<TemplateArgument, TemplateArgumentKind,
@@ -806,6 +992,17 @@ let Class = PropertyTypeCase<TemplateArgument, "Integral"> in {
   }
   def : Creator<[{
     return TemplateArgument(ctx, value, type, isDefaulted);
+  }]>;
+}
+let Class = PropertyTypeCase<TemplateArgument, "SpliceSpecifier"> in {
+  def : Property<"value", CXXSpliceSpecifierExprRef> {
+    let Read = [{ node.getAsSpliceSpecifier() }];
+  }
+  def : Property<"isDefaulted", Bool> {
+    let Read = [{ node.getIsDefaulted() }];
+  }
+  def : Creator<[{
+    return TemplateArgument(value, isDefaulted);
   }]>;
 }
 let Class = PropertyTypeCase<TemplateArgument, "StructuralValue"> in {

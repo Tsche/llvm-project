@@ -1,4 +1,9 @@
-# RUN: rm -rf %t && mkdir -p %t/armv7 && mkdir -p %t/thumbv7
+# RUN: rm -rf %t && mkdir -p %t/armv6 && mkdir -p %t/armv7 && mkdir -p %t/thumbv7
+# RUN: llvm-mc -triple=armv6-none-linux-gnueabi -arm-add-build-attributes -filetype=obj -o %t/armv6/out.o %s
+# RUN: llvm-objdump -r %t/armv6/out.o | FileCheck --check-prefix=CHECK-TYPE %s
+# RUN: llvm-jitlink -noexec -slab-address 0x76ff0000 -slab-allocate 10Kb -slab-page-size 4096 \
+# RUN:              -abs target=0x76bbe88f -check %s %t/armv6/out.o
+
 # RUN: llvm-mc -triple=armv7-none-linux-gnueabi -arm-add-build-attributes -filetype=obj -o %t/armv7/out.o %s
 # RUN: llvm-objdump -r %t/armv7/out.o | FileCheck --check-prefix=CHECK-TYPE %s
 # RUN: llvm-jitlink -noexec -slab-address 0x76ff0000 -slab-allocate 10Kb -slab-page-size 4096 \
@@ -45,7 +50,7 @@ target1_abs32:
 # The +12 accounts for the ARM branch offset (8) and the .LPC offset (4), which
 # is stored as initial addend inline.
 # FIXME: We shouldn't need to substract the 64-bit sign-extension manually.
-# jitlink-check: *{4}got_prel_offset = got_addr(out.o, target) - (got_prel + 12) - 0xffffffff00000000
+# jitlink-check: *{4}got_prel_offset = got_addr(out.o, target) - (next_pc(got_prel) + 4) - 0xffffffff00000000
 	.globl	got_prel
 	.type	got_prel,%function
 	.p2align	2

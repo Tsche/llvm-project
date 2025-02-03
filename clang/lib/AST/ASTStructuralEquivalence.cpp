@@ -1,5 +1,7 @@
 //===- ASTStructuralEquivalence.cpp ---------------------------------------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -74,6 +76,7 @@
 #include "clang/AST/ExprOpenMP.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/TemplateName.h"
@@ -85,7 +88,6 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cassert>
@@ -347,6 +349,15 @@ class StmtComparer {
     return true;
   }
 
+  bool IsStmtEquivalent(const CXXDependentScopeMemberExpr *E1,
+                        const CXXDependentScopeMemberExpr *E2) {
+    if (!IsStructurallyEquivalent(Context, E1->getMember(), E2->getMember())) {
+      return false;
+    }
+    return IsStructurallyEquivalent(Context, E1->getBaseType(),
+                                    E2->getBaseType());
+  }
+
   bool IsStmtEquivalent(const UnaryExprOrTypeTraitExpr *E1,
                         const UnaryExprOrTypeTraitExpr *E2) {
     if (E1->getKind() != E2->getKind())
@@ -561,8 +572,11 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   case NestedNameSpecifier::Global:
     return true;
   case NestedNameSpecifier::Super:
-    return IsStructurallyEquivalent(Context, NNS1->getAsRecordDecl(),
+    return IsStructurallyEquivalent(Context,
+                                    NNS1->getAsRecordDecl(),
                                     NNS2->getAsRecordDecl());
+  case NestedNameSpecifier::Splice:
+    llvm::report_fatal_error("unimplemented: IsStructurallyEquivalent");
   }
   return false;
 }
@@ -635,6 +649,9 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
      // It is sufficient to check value of getAsTemplateDecl.
      break;
 
+   case TemplateName::DeducedTemplate:
+     // FIXME: We can't reach here.
+     llvm_unreachable("unimplemented");
   }
 
   return true;
@@ -665,6 +682,9 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
     return llvm::APSInt::isSameValue(Arg1.getAsIntegral(),
                                      Arg2.getAsIntegral());
+
+  case TemplateArgument::SpliceSpecifier:
+    return Arg1.getAsSpliceSpecifier() == Arg2.getAsSpliceSpecifier();
 
   case TemplateArgument::Declaration:
     return IsStructurallyEquivalent(Context, Arg1.getAsDecl(), Arg2.getAsDecl());
@@ -839,6 +859,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
   case Type::Adjusted:
   case Type::Decayed:
+  case Type::ArrayParameter:
     if (!IsStructurallyEquivalent(Context,
                                   cast<AdjustedType>(T1)->getOriginalType(),
                                   cast<AdjustedType>(T2)->getOriginalType()))
@@ -1068,10 +1089,31 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
       return false;
     break;
 
+  case Type::CountAttributed:
+    if (!IsStructurallyEquivalent(Context,
+                                  cast<CountAttributedType>(T1)->desugar(),
+                                  cast<CountAttributedType>(T2)->desugar()))
+      return false;
+    break;
+
   case Type::BTFTagAttributed:
     if (!IsStructurallyEquivalent(
             Context, cast<BTFTagAttributedType>(T1)->getWrappedType(),
             cast<BTFTagAttributedType>(T2)->getWrappedType()))
+      return false;
+    break;
+
+  case Type::HLSLAttributedResource:
+    if (!IsStructurallyEquivalent(
+            Context, cast<HLSLAttributedResourceType>(T1)->getWrappedType(),
+            cast<HLSLAttributedResourceType>(T2)->getWrappedType()))
+      return false;
+    if (!IsStructurallyEquivalent(
+            Context, cast<HLSLAttributedResourceType>(T1)->getContainedType(),
+            cast<HLSLAttributedResourceType>(T2)->getContainedType()))
+      return false;
+    if (cast<HLSLAttributedResourceType>(T1)->getAttrs() !=
+        cast<HLSLAttributedResourceType>(T2)->getAttrs())
       return false;
     break;
 
@@ -1131,6 +1173,13 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     if (!IsStructurallyEquivalent(Context,
                                   cast<DecltypeType>(T1)->getUnderlyingExpr(),
                                   cast<DecltypeType>(T2)->getUnderlyingExpr()))
+      return false;
+    break;
+
+  case Type::ReflectionSplice:
+    if (!IsStructurallyEquivalent(Context,
+                                  cast<ReflectionSpliceType>(T1)->getOperand(),
+                                  cast<ReflectionSpliceType>(T2)->getOperand()))
       return false;
     break;
 
@@ -1276,8 +1325,13 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     if (!IsStructurallyEquivalent(Context, Spec1->getQualifier(),
                                   Spec2->getQualifier()))
       return false;
-    if (!IsStructurallyEquivalent(Spec1->getIdentifier(),
-                                  Spec2->getIdentifier()))
+    if (Spec1->hasIdentifier() &&
+        !(Spec2->hasIdentifier() &&
+          IsStructurallyEquivalent(Spec1->getIdentifier(),
+                                   Spec2->getIdentifier())))
+      return false;
+    if (Spec1->hasSplice() &&
+        !(Spec2->hasSplice() && Spec1->getSplice() == Spec2->getSplice()))
       return false;
     if (!IsStructurallyEquivalent(Context, Spec1->template_arguments(),
                                   Spec2->template_arguments()))
@@ -1290,6 +1344,16 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                   cast<PackExpansionType>(T1)->getPattern(),
                                   cast<PackExpansionType>(T2)->getPattern()))
       return false;
+    break;
+
+  case Type::PackIndexing:
+    if (!IsStructurallyEquivalent(Context,
+                                  cast<PackIndexingType>(T1)->getPattern(),
+                                  cast<PackIndexingType>(T2)->getPattern()))
+      if (!IsStructurallyEquivalent(Context,
+                                    cast<PackIndexingType>(T1)->getIndexExpr(),
+                                    cast<PackIndexingType>(T2)->getIndexExpr()))
+        return false;
     break;
 
   case Type::ObjCInterface: {
@@ -1379,15 +1443,21 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
 static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                      VarDecl *D1, VarDecl *D2) {
-  if (D1->getStorageClass() != D2->getStorageClass())
-    return false;
-
   IdentifierInfo *Name1 = D1->getIdentifier();
   IdentifierInfo *Name2 = D2->getIdentifier();
   if (!::IsStructurallyEquivalent(Name1, Name2))
     return false;
 
   if (!IsStructurallyEquivalent(Context, D1->getType(), D2->getType()))
+    return false;
+
+  // Compare storage class and initializer only if none or both are a
+  // definition. Like a forward-declaration matches a class definition, variable
+  // declarations that are not definitions should match with the definitions.
+  if (D1->isThisDeclarationADefinition() != D2->isThisDeclarationADefinition())
+    return true;
+
+  if (D1->getStorageClass() != D2->getStorageClass())
     return false;
 
   return IsStructurallyEquivalent(Context, D1->getInit(), D2->getInit());
@@ -1972,7 +2042,10 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     }
     return false;
   }
-
+  if (!Context.IgnoreTemplateParmDepth && D1->getDepth() != D2->getDepth())
+    return false;
+  if (D1->getIndex() != D2->getIndex())
+    return false;
   // Check types.
   if (!IsStructurallyEquivalent(Context, D1->getType(), D2->getType())) {
     if (Context.Complain) {
@@ -2249,7 +2322,8 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 
   // Check whether we already know that these two declarations are not
   // structurally equivalent.
-  if (Context.NonEquivalentDecls.count(P))
+  if (Context.NonEquivalentDecls.count(
+          std::make_tuple(D1, D2, Context.IgnoreTemplateParmDepth)))
     return false;
 
   // Check if a check for these declarations is already pending.
@@ -2457,7 +2531,8 @@ bool StructuralEquivalenceContext::Finish() {
     if (!Equivalent) {
       // Note that these two declarations are not equivalent (and we already
       // know about it).
-      NonEquivalentDecls.insert(P);
+      NonEquivalentDecls.insert(
+          std::make_tuple(D1, D2, IgnoreTemplateParmDepth));
 
       return true;
     }

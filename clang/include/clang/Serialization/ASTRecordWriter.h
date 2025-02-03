@@ -1,5 +1,7 @@
 //===- ASTRecordWriter.h - Helper classes for writing AST -------*- C++ -*-===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -15,12 +17,14 @@
 #define LLVM_CLANG_SERIALIZATION_ASTRECORDWRITER_H
 
 #include "clang/AST/AbstractBasicWriter.h"
+#include "clang/AST/OpenACCClause.h"
 #include "clang/AST/OpenMPClause.h"
 #include "clang/Serialization/ASTWriter.h"
 #include "clang/Serialization/SourceLocationEncoding.h"
 
 namespace clang {
 
+class OpenACCClause;
 class TypeLoc;
 
 /// An object for streaming information to a record.
@@ -58,8 +62,9 @@ class ASTRecordWriter
 
 public:
   /// Construct a ASTRecordWriter that uses the default encoding scheme.
-  ASTRecordWriter(ASTWriter &W, ASTWriter::RecordDataImpl &Record)
-      : DataStreamBasicWriter(W.getASTContext()), Writer(&W), Record(&Record) {}
+  ASTRecordWriter(ASTContext &Context, ASTWriter &W,
+                  ASTWriter::RecordDataImpl &Record)
+      : DataStreamBasicWriter(Context), Writer(&W), Record(&Record) {}
 
   /// Construct a ASTRecordWriter that uses the same encoding scheme as another
   /// ASTRecordWriter.
@@ -126,6 +131,8 @@ public:
     AddStmt(const_cast<Stmt*>(S));
   }
 
+  void writeAttr(const Attr *A) { AddAttr(A); }
+
   /// Write an BTFTypeTagAttr object.
   void writeBTFTypeTagAttr(const BTFTypeTagAttr *A) { AddAttr(A); }
 
@@ -141,12 +148,21 @@ public:
     AddSourceLocation(Loc);
   }
 
+  void writeTypeCoupledDeclRefInfo(TypeCoupledDeclRefInfo Info) {
+    writeDeclRef(Info.getDecl());
+    writeBool(Info.isDeref());
+  }
+
   /// Emit a source range.
   void AddSourceRange(SourceRange Range, LocSeq *Seq = nullptr) {
     return Writer->AddSourceRange(Range, *Record, Seq);
   }
 
   void writeBool(bool Value) {
+    Record->push_back(Value);
+  }
+
+  void writeChar(char Value) {
     Record->push_back(Value);
   }
 
@@ -197,9 +213,13 @@ public:
   /// Emit a set of C++ base specifiers.
   void AddCXXBaseSpecifiers(ArrayRef<CXXBaseSpecifier> Bases);
 
+  void writeCXXBaseSpecifierRef(const CXXBaseSpecifier *S) {
+    AddCXXBaseSpecifier(*S);
+  }
+
   /// Emit a reference to a type.
   void AddTypeRef(QualType T) {
-    return Writer->AddTypeRef(T, *Record);
+    return Writer->AddTypeRef(getASTContext(), T, *Record);
   }
   void writeQualType(QualType T) {
     AddTypeRef(T);
@@ -231,6 +251,11 @@ public:
   }
   void writeDeclRef(const Decl *D) {
     AddDeclRef(D);
+  }
+
+  /// Emit a TagDataMemberSpec.
+  void writeTagDataMemberSpecRef(const TagDataMemberSpec *Spec) {
+    // TODO(P2996): Implement this.
   }
 
   /// Emit a declaration name.
@@ -286,6 +311,16 @@ public:
 
   /// Writes data related to the OpenMP directives.
   void writeOMPChildren(OMPChildren *Data);
+
+  void writeOpenACCVarList(const OpenACCClauseWithVarList *C);
+
+  void writeOpenACCIntExprList(ArrayRef<Expr *> Exprs);
+
+  /// Writes out a single OpenACC Clause.
+  void writeOpenACCClause(const OpenACCClause *C);
+
+  /// Writes out a list of OpenACC clauses.
+  void writeOpenACCClauseList(ArrayRef<const OpenACCClause *> Clauses);
 
   /// Emit a string.
   void AddString(StringRef Str) {

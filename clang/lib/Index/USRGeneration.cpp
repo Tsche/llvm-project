@@ -1,5 +1,7 @@
 //===- USRGeneration.cpp - Routines for USR generation --------------------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -62,20 +64,17 @@ namespace {
 class USRGenerator : public ConstDeclVisitor<USRGenerator> {
   SmallVectorImpl<char> &Buf;
   llvm::raw_svector_ostream Out;
-  bool IgnoreResults;
   ASTContext *Context;
-  bool generatedLoc;
+  const LangOptions &LangOpts;
+  bool IgnoreResults = false;
+  bool generatedLoc = false;
 
   llvm::DenseMap<const Type *, unsigned> TypeSubstitutions;
 
 public:
-  explicit USRGenerator(ASTContext *Ctx, SmallVectorImpl<char> &Buf)
-  : Buf(Buf),
-    Out(Buf),
-    IgnoreResults(false),
-    Context(Ctx),
-    generatedLoc(false)
-  {
+  USRGenerator(ASTContext *Ctx, SmallVectorImpl<char> &Buf,
+               const LangOptions &LangOpts)
+      : Buf(Buf), Out(Buf), Context(Ctx), LangOpts(LangOpts) {
     // Add the USR space prefix.
     Out << getUSRSpacePrefix();
   }
@@ -246,31 +245,41 @@ void USRGenerator::VisitFunctionDecl(const FunctionDecl *D) {
   } else
     Out << "@F@";
 
-  PrintingPolicy Policy(Context->getLangOpts());
+  PrintingPolicy Policy(LangOpts);
   // Forward references can have different template argument names. Suppress the
   // template argument names in constructors to make their USR more stable.
   Policy.SuppressTemplateArgsInCXXConstructors = true;
   D->getDeclName().print(Out, Policy);
 
-  ASTContext &Ctx = *Context;
-  if ((!Ctx.getLangOpts().CPlusPlus || D->isExternC()) &&
+  if ((!LangOpts.CPlusPlus || D->isExternC()) &&
       !D->hasAttr<OverloadableAttr>())
     return;
 
-  if (const TemplateArgumentList *
-        SpecArgs = D->getTemplateSpecializationArgs()) {
+  if (D->isFunctionTemplateSpecialization()) {
     Out << '<';
-    for (unsigned I = 0, N = SpecArgs->size(); I != N; ++I) {
-      Out << '#';
-      VisitTemplateArgument(SpecArgs->get(I));
+    if (const TemplateArgumentList *SpecArgs =
+            D->getTemplateSpecializationArgs()) {
+      for (const auto &Arg : SpecArgs->asArray()) {
+        Out << '#';
+        VisitTemplateArgument(Arg);
+      }
+    } else if (const ASTTemplateArgumentListInfo *SpecArgsWritten =
+                   D->getTemplateSpecializationArgsAsWritten()) {
+      for (const auto &ArgLoc : SpecArgsWritten->arguments()) {
+        Out << '#';
+        VisitTemplateArgument(ArgLoc.getArgument());
+      }
     }
     Out << '>';
   }
 
+  QualType CanonicalType = D->getType().getCanonicalType();
   // Mangle in type information for the arguments.
-  for (auto *PD : D->parameters()) {
-    Out << '#';
-    VisitType(PD->getType());
+  if (const auto *FPT = CanonicalType->getAs<FunctionProtoType>()) {
+    for (QualType PT : FPT->param_types()) {
+      Out << '#';
+      VisitType(PT);
+    }
   }
   if (D->isVariadic())
     Out << '.';
@@ -646,9 +655,10 @@ bool USRGenerator::GenLoc(const Decl *D, bool IncludeOffset) {
   return IgnoreResults;
 }
 
-static void printQualifier(llvm::raw_ostream &Out, ASTContext &Ctx, NestedNameSpecifier *NNS) {
+static void printQualifier(llvm::raw_ostream &Out, const LangOptions &LangOpts,
+                           NestedNameSpecifier *NNS) {
   // FIXME: Encode the qualifier, don't just print it.
-  PrintingPolicy PO(Ctx.getLangOpts());
+  PrintingPolicy PO(LangOpts);
   PO.SuppressTagKeyword = true;
   PO.SuppressUnwrittenScope = true;
   PO.ConstantArraySizeAsWritten = false;
@@ -737,6 +747,8 @@ void USRGenerator::VisitType(QualType T) {
           Out << 'Q'; break;
         case BuiltinType::NullPtr:
           Out << 'n'; break;
+        case BuiltinType::MetaInfo:
+          Out << 'm'; break;
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
         case BuiltinType::Id: \
           Out << "@BT@" << #Suffix << "_" << #ImgType; break;
@@ -769,6 +781,16 @@ void USRGenerator::VisitType(QualType T) {
 #include "clang/Basic/RISCVVTypes.def"
 #define WASM_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
 #include "clang/Basic/WebAssemblyReferenceTypes.def"
+#define AMDGPU_TYPE(Name, Id, SingletonId, Width, Align)                       \
+  case BuiltinType::Id:                                                        \
+    Out << "@BT@" << #Name;                                                    \
+    break;
+#include "clang/Basic/AMDGPUTypes.def"
+#define HLSL_INTANGIBLE_TYPE(Name, Id, SingletonId)                            \
+  case BuiltinType::Id:                                                        \
+    Out << "@BT@" << #Name;                                                    \
+    break;
+#include "clang/Basic/HLSLIntangibleTypes.def"
         case BuiltinType::ShortAccum:
           Out << "@BT@ShortAccum"; break;
         case BuiltinType::Accum:
@@ -927,7 +949,7 @@ void USRGenerator::VisitType(QualType T) {
     }
     if (const DependentNameType *DNT = T->getAs<DependentNameType>()) {
       Out << '^';
-      printQualifier(Out, Ctx, DNT->getQualifier());
+      printQualifier(Out, LangOpts, DNT->getQualifier());
       Out << ':' << DNT->getIdentifier()->getName();
       return;
     }
@@ -1069,7 +1091,7 @@ void USRGenerator::VisitUnresolvedUsingValueDecl(const UnresolvedUsingValueDecl 
     return;
   VisitDeclContext(D->getDeclContext());
   Out << "@UUV@";
-  printQualifier(Out, D->getASTContext(), D->getQualifier());
+  printQualifier(Out, LangOpts, D->getQualifier());
   EmitDeclName(D);
 }
 
@@ -1078,7 +1100,7 @@ void USRGenerator::VisitUnresolvedUsingTypenameDecl(const UnresolvedUsingTypenam
     return;
   VisitDeclContext(D->getDeclContext());
   Out << "@UUT@";
-  printQualifier(Out, D->getASTContext(), D->getQualifier());
+  printQualifier(Out, LangOpts, D->getQualifier());
   Out << D->getName(); // Simple name.
 }
 
@@ -1169,6 +1191,13 @@ bool clang::index::generateUSRForDecl(const Decl *D,
                                       SmallVectorImpl<char> &Buf) {
   if (!D)
     return true;
+  return generateUSRForDecl(D, Buf, D->getASTContext().getLangOpts());
+}
+
+bool clang::index::generateUSRForDecl(const Decl *D, SmallVectorImpl<char> &Buf,
+                                      const LangOptions &LangOpts) {
+  if (!D)
+    return true;
   // We don't ignore decls with invalid source locations. Implicit decls, like
   // C++'s operator new function, can have invalid locations but it is fine to
   // create USRs that can identify them.
@@ -1182,7 +1211,7 @@ bool clang::index::generateUSRForDecl(const Decl *D,
       return false;
     }
   }
-  USRGenerator UG(&D->getASTContext(), Buf);
+  USRGenerator UG(&D->getASTContext(), Buf, LangOpts);
   UG.Visit(D);
   return UG.ignoreResults();
 }
@@ -1219,11 +1248,17 @@ bool clang::index::generateUSRForMacro(StringRef MacroName, SourceLocation Loc,
 
 bool clang::index::generateUSRForType(QualType T, ASTContext &Ctx,
                                       SmallVectorImpl<char> &Buf) {
+  return generateUSRForType(T, Ctx, Buf, Ctx.getLangOpts());
+}
+
+bool clang::index::generateUSRForType(QualType T, ASTContext &Ctx,
+                                      SmallVectorImpl<char> &Buf,
+                                      const LangOptions &LangOpts) {
   if (T.isNull())
     return true;
   T = T.getCanonicalType();
 
-  USRGenerator UG(&Ctx, Buf);
+  USRGenerator UG(&Ctx, Buf, LangOpts);
   UG.VisitType(T);
   return UG.ignoreResults();
 }

@@ -16,9 +16,7 @@
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/SemaInternal.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringRef.h"
 #include <cassert>
 #include <cstddef>
 #include <utility>
@@ -100,6 +98,12 @@ void AttributePool::takePool(AttributePool &pool) {
   pool.Attrs.clear();
 }
 
+void AttributePool::takeFrom(ParsedAttributesView &List, AttributePool &Pool) {
+  assert(&Pool != this && "AttributePool can't take attributes from itself");
+  llvm::for_each(List.AttrList, [&Pool](ParsedAttr *A) { Pool.remove(A); });
+  Attrs.insert(Attrs.end(), List.AttrList.begin(), List.AttrList.end());
+}
+
 namespace {
 
 #include "clang/Sema/AttrParsedAttrImpl.inc"
@@ -110,6 +114,13 @@ const ParsedAttrInfo &ParsedAttrInfo::get(const AttributeCommonInfo &A) {
   // If we have a ParsedAttrInfo for this ParsedAttr then return that.
   if ((size_t)A.getParsedKind() < std::size(AttrInfoMap))
     return *AttrInfoMap[A.getParsedKind()];
+
+  // If this is an annotation then return an appropriate ParsedAttrInfo.
+  static const ParsedAttrInfo AnnotationAttrInfo(
+      AttributeCommonInfo::AnnotationAttribute, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, {},
+      nullptr);
+  if (A.getSyntax() == AttributeCommonInfo::AS_Annotation)
+    return AnnotationAttrInfo;
 
   // If this is an ignored attribute then return an appropriate ParsedAttrInfo.
   static const ParsedAttrInfo IgnoredParsedAttrInfo(
@@ -219,7 +230,7 @@ bool ParsedAttr::slidesFromDeclToDeclSpecLegacyBehavior() const {
     // atributes.
     return false;
 
-  assert(isStandardAttributeSyntax());
+  assert(isStandardAttributeSyntax() || isAlignas() || isAnnotation());
 
   // We have historically allowed some type attributes with standard attribute
   // syntax to slide to the decl-specifier-seq, so we have to keep supporting

@@ -26,6 +26,7 @@
 namespace clang {
 
 class ASTContext;
+class CXXSpliceSpecifierExpr;
 class Decl;
 class DependentTemplateName;
 class IdentifierInfo;
@@ -34,6 +35,7 @@ class NestedNameSpecifier;
 enum OverloadedOperatorKind : int;
 class OverloadedTemplateStorage;
 class AssumedTemplateStorage;
+class DeducedTemplateStorage;
 struct PrintingPolicy;
 class QualifiedTemplateName;
 class SubstTemplateTemplateParmPackStorage;
@@ -50,16 +52,17 @@ protected:
   enum Kind {
     Overloaded,
     Assumed, // defined in DeclarationName.h
+    Deduced,
     SubstTemplateTemplateParm,
     SubstTemplateTemplateParmPack
   };
 
   struct BitsTag {
     LLVM_PREFERRED_TYPE(Kind)
-    unsigned Kind : 2;
+    unsigned Kind : 3;
 
     // The template parameter index.
-    unsigned Index : 15;
+    unsigned Index : 14;
 
     /// The pack index, or the number of stored templates
     /// or template arguments, depending on which subclass we have.
@@ -88,6 +91,12 @@ public:
     return Bits.Kind == Assumed
              ? reinterpret_cast<AssumedTemplateStorage *>(this)
              : nullptr;
+  }
+
+  DeducedTemplateStorage *getAsDeducedTemplateName() {
+    return Bits.Kind == Deduced
+               ? reinterpret_cast<DeducedTemplateStorage *>(this)
+               : nullptr;
   }
 
   SubstTemplateTemplateParmStorage *getAsSubstTemplateTemplateParm() {
@@ -172,6 +181,15 @@ public:
                       unsigned Index, bool Final);
 };
 
+struct DefaultArguments {
+  // The position in the template parameter list
+  // the first argument corresponds to.
+  unsigned StartPos;
+  ArrayRef<TemplateArgument> Args;
+
+  operator bool() const { return !Args.empty(); }
+};
+
 /// Represents a C++ template name within the type system.
 ///
 /// A C++ template name refers to a template within the C++ type
@@ -198,7 +216,8 @@ public:
 ///
 /// Here, "apply" is treated as a template name within the typename
 /// specifier in the typedef. "apply" is a nested template, and can
-/// only be understood in the context of
+/// only be understood in the context of a template instantiation,
+/// hence is represented as a dependent template name.
 class TemplateName {
   // NameDecl is either a TemplateDecl or a UsingShadowDecl depending on the
   // NameKind.
@@ -245,6 +264,10 @@ public:
     /// A template name that refers to a template declaration found through a
     /// specific using shadow declaration.
     UsingTemplate,
+
+    /// A template name that refers to another TemplateName with deduced default
+    /// arguments.
+    DeducedTemplate,
   };
 
   TemplateName() = default;
@@ -256,6 +279,7 @@ public:
   explicit TemplateName(QualifiedTemplateName *Qual);
   explicit TemplateName(DependentTemplateName *Dep);
   explicit TemplateName(UsingShadowDecl *Using);
+  explicit TemplateName(DeducedTemplateStorage *Deduced);
 
   /// Determine whether this template name is NULL.
   bool isNull() const;
@@ -270,7 +294,13 @@ public:
   /// to, if any. If the template name does not refer to a specific
   /// declaration because it is a dependent name, or if it refers to a
   /// set of function templates, returns NULL.
-  TemplateDecl *getAsTemplateDecl() const;
+  TemplateDecl *getAsTemplateDecl(bool IgnoreDeduced = false) const;
+
+  /// Retrieves the underlying template declaration that
+  /// this template name refers to, along with the
+  /// deduced default arguments, if any.
+  std::pair<TemplateDecl *, DefaultArguments>
+  getTemplateDeclAndDefaultArgs() const;
 
   /// Retrieve the underlying, overloaded function template
   /// declarations that this template name refers to, if known.
@@ -312,12 +342,12 @@ public:
   /// template declaration is introduced, if any.
   UsingShadowDecl *getAsUsingShadowDecl() const;
 
-  TemplateName getUnderlying() const;
+  /// Retrieve the deduced template info, if any.
+  DeducedTemplateStorage *getAsDeducedTemplateName() const;
 
-  /// Get the template name to substitute when this template name is used as a
-  /// template template argument. This refers to the most recent declaration of
-  /// the template, including any default template arguments.
-  TemplateName getNameToSubstitute() const;
+  std::optional<TemplateName> desugar(bool IgnoreDeduced) const;
+
+  TemplateName getUnderlying() const;
 
   TemplateNameDependence getDependence() const;
 
@@ -332,7 +362,7 @@ public:
   /// unexpanded parameter pack (for C++0x variadic templates).
   bool containsUnexpandedParameterPack() const;
 
-  enum class Qualified { None, AsWritten, Fully };
+  enum class Qualified { None, AsWritten };
   /// Print the template name.
   ///
   /// \param OS the output stream to which the template name will be
@@ -345,13 +375,15 @@ public:
              Qualified Qual = Qualified::AsWritten) const;
 
   /// Debugging aid that dumps the template name.
-  void dump(raw_ostream &OS) const;
+  void dump(raw_ostream &OS, const ASTContext &Context) const;
 
   /// Debugging aid that dumps the template name to standard
   /// error.
   void dump() const;
 
-  void Profile(llvm::FoldingSetNodeID &ID);
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    ID.AddPointer(Storage.getOpaqueValue());
+  }
 
   /// Retrieve the template name as a void pointer.
   void *getAsVoidPointer() const { return Storage.getOpaqueValue(); }
@@ -360,6 +392,10 @@ public:
   static TemplateName getFromVoidPointer(void *Ptr) {
     return TemplateName(Ptr);
   }
+
+  /// Structural equality.
+  bool operator==(TemplateName Other) const { return Storage == Other.Storage; }
+  bool operator!=(TemplateName Other) const { return !operator==(Other); }
 };
 
 /// Insertion operator for diagnostics.  This allows sending TemplateName's
@@ -410,6 +446,30 @@ public:
                       std::optional<unsigned> PackIndex);
 };
 
+class DeducedTemplateStorage : public UncommonTemplateNameStorage,
+                               public llvm::FoldingSetNode {
+  friend class ASTContext;
+
+  TemplateName Underlying;
+
+  DeducedTemplateStorage(TemplateName Underlying,
+                         const DefaultArguments &DefArgs);
+
+public:
+  TemplateName getUnderlying() const { return Underlying; }
+
+  DefaultArguments getDefaultArguments() const {
+    return {/*StartPos=*/Bits.Index,
+            /*Args=*/{reinterpret_cast<const TemplateArgument *>(this + 1),
+                      Bits.Data}};
+  }
+
+  void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context) const;
+
+  static void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context,
+                      TemplateName Underlying, const DefaultArguments &DefArgs);
+};
+
 inline TemplateName TemplateName::getUnderlying() const {
   if (SubstTemplateTemplateParmStorage *subst
         = getAsSubstTemplateTemplateParm())
@@ -417,17 +477,18 @@ inline TemplateName TemplateName::getUnderlying() const {
   return *this;
 }
 
-/// Represents a template name that was expressed as a
-/// qualified name.
+/// Represents a template name as written in source code.
 ///
-/// This kind of template name refers to a template name that was
+/// This kind of template name may refer to a template name that was
 /// preceded by a nested name specifier, e.g., \c std::vector. Here,
 /// the nested name specifier is "std::" and the template name is the
-/// declaration for "vector". The QualifiedTemplateName class is only
-/// used to provide "sugar" for template names that were expressed
-/// with a qualified name, and has no semantic meaning. In this
-/// manner, it is to TemplateName what ElaboratedType is to Type,
-/// providing extra syntactic sugar for downstream clients.
+/// declaration for "vector". It may also have been written with the
+/// 'template' keyword. The QualifiedTemplateName class is only
+/// used to provide "sugar" for template names, so that they can
+/// be differentiated from canonical template names. and has no
+/// semantic meaning. In this manner, it is to TemplateName what
+/// ElaboratedType is to Type, providing extra syntactic sugar
+/// for downstream clients.
 class QualifiedTemplateName : public llvm::FoldingSetNode {
   friend class ASTContext;
 
@@ -488,13 +549,19 @@ public:
 class DependentTemplateName : public llvm::FoldingSetNode {
   friend class ASTContext;
 
+  enum Kind {
+    DTNK_Identifier,
+    DTNK_Operator,
+    DTNK_SpliceSpecifier,
+  };
+
   /// The nested name specifier that qualifies the template
   /// name.
   ///
   /// The bit stored in this qualifier describes whether the \c Name field
   /// is interpreted as an IdentifierInfo pointer (when clear) or as an
   /// overloaded operator kind (when set).
-  llvm::PointerIntPair<NestedNameSpecifier *, 1, bool> Qualifier;
+  llvm::PointerIntPair<NestedNameSpecifier *, 2, Kind> Qualifier;
 
   /// The dependent template name.
   union {
@@ -507,6 +574,11 @@ class DependentTemplateName : public llvm::FoldingSetNode {
     ///
     /// Only valid when the bit on \c Qualifier is set.
     OverloadedOperatorKind Operator;
+
+    /// The dependent splice expression.
+    ///
+    /// Only valid when the NestedNameSpecifier on \c Qualifier is unset.
+    const CXXSpliceSpecifierExpr *SpliceExpr;
   };
 
   /// The canonical template name to which this dependent
@@ -519,32 +591,36 @@ class DependentTemplateName : public llvm::FoldingSetNode {
 
   DependentTemplateName(NestedNameSpecifier *Qualifier,
                         const IdentifierInfo *Identifier)
-      : Qualifier(Qualifier, false), Identifier(Identifier),
+      : Qualifier(Qualifier, DTNK_Identifier), Identifier(Identifier),
         CanonicalTemplateName(this) {}
 
   DependentTemplateName(NestedNameSpecifier *Qualifier,
                         const IdentifierInfo *Identifier,
                         TemplateName Canon)
-      : Qualifier(Qualifier, false), Identifier(Identifier),
+      : Qualifier(Qualifier, DTNK_Identifier), Identifier(Identifier),
         CanonicalTemplateName(Canon) {}
 
   DependentTemplateName(NestedNameSpecifier *Qualifier,
                         OverloadedOperatorKind Operator)
-      : Qualifier(Qualifier, true), Operator(Operator),
+      : Qualifier(Qualifier, DTNK_Operator), Operator(Operator),
         CanonicalTemplateName(this) {}
 
   DependentTemplateName(NestedNameSpecifier *Qualifier,
                         OverloadedOperatorKind Operator,
                         TemplateName Canon)
-       : Qualifier(Qualifier, true), Operator(Operator),
+       : Qualifier(Qualifier, DTNK_Operator), Operator(Operator),
          CanonicalTemplateName(Canon) {}
+
+  DependentTemplateName(const CXXSpliceSpecifierExpr *SpliceExpr)
+       : Qualifier(nullptr, DTNK_SpliceSpecifier), SpliceExpr(SpliceExpr),
+         CanonicalTemplateName(this) {}
 
 public:
   /// Return the nested name specifier that qualifies this name.
   NestedNameSpecifier *getQualifier() const { return Qualifier.getPointer(); }
 
   /// Determine whether this template name refers to an identifier.
-  bool isIdentifier() const { return !Qualifier.getInt(); }
+  bool isIdentifier() const { return Qualifier.getInt() == DTNK_Identifier; }
 
   /// Returns the identifier to which this template name refers.
   const IdentifierInfo *getIdentifier() const {
@@ -554,7 +630,9 @@ public:
 
   /// Determine whether this template name refers to an overloaded
   /// operator.
-  bool isOverloadedOperator() const { return Qualifier.getInt(); }
+  bool isOverloadedOperator() const {
+    return Qualifier.getInt() == DTNK_Operator;
+  }
 
   /// Return the overloaded operator to which this template name refers.
   OverloadedOperatorKind getOperator() const {
@@ -563,25 +641,44 @@ public:
     return Operator;
   }
 
+  /// Determine whether this template name refers to a splice specifier.
+  bool isSpliceSpecifier() const {
+    return Qualifier.getInt() == DTNK_SpliceSpecifier;
+  }
+
+  const CXXSpliceSpecifierExpr *getSpliceSpecifier() const {
+    assert(isSpliceSpecifier() && "Template name isn't a splice specifier?");
+    return SpliceExpr;
+  }
+
   void Profile(llvm::FoldingSetNodeID &ID) {
     if (isIdentifier())
       Profile(ID, getQualifier(), getIdentifier());
-    else
+    else if (isOverloadedOperator())
       Profile(ID, getQualifier(), getOperator());
+    else
+      Profile(ID, getSpliceSpecifier());
   }
 
   static void Profile(llvm::FoldingSetNodeID &ID, NestedNameSpecifier *NNS,
                       const IdentifierInfo *Identifier) {
     ID.AddPointer(NNS);
-    ID.AddBoolean(false);
+    ID.AddInteger(DTNK_Identifier);
     ID.AddPointer(Identifier);
   }
 
   static void Profile(llvm::FoldingSetNodeID &ID, NestedNameSpecifier *NNS,
                       OverloadedOperatorKind Operator) {
     ID.AddPointer(NNS);
-    ID.AddBoolean(true);
+    ID.AddInteger(DTNK_Operator);
     ID.AddInteger(Operator);
+  }
+
+  static void Profile(llvm::FoldingSetNodeID &ID,
+                      const CXXSpliceSpecifierExpr *Splice) {
+    ID.AddPointer(nullptr);
+    ID.AddPointer(Splice);
+    ID.AddInteger(DTNK_SpliceSpecifier);
   }
 };
 

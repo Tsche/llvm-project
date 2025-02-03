@@ -1,5 +1,7 @@
 //===--- DeclSpec.cpp - Declaration Specifier Semantic Analysis -----------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -22,9 +24,6 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Sema.h"
-#include "clang/Sema/SemaDiagnostic.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallString.h"
 #include <cstring>
 using namespace clang;
 
@@ -117,6 +116,18 @@ void CXXScopeSpec::MakeSuper(ASTContext &Context, CXXRecordDecl *RD,
   Builder.MakeSuper(Context, RD, SuperLoc, ColonColonLoc);
 
   Range.setBegin(SuperLoc);
+  Range.setEnd(ColonColonLoc);
+
+  assert(Range == Builder.getSourceRange() &&
+  "NestedNameSpecifierLoc range computation incorrect");
+}
+
+void CXXScopeSpec::MakeSpliceSpecifier(ASTContext &Context,
+                                       CXXSpliceSpecifierExpr * Expr,
+                                       SourceLocation ColonColonLoc) {
+  Builder.MakeSpliceSpecifier(Context, Expr, ColonColonLoc);
+
+  Range.setBegin(Expr->getLSpliceLoc());
   Range.setEnd(ColonColonLoc);
 
   assert(Range == Builder.getSourceRange() &&
@@ -293,7 +304,7 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
 
 void Declarator::setDecompositionBindings(
     SourceLocation LSquareLoc,
-    ArrayRef<DecompositionDeclarator::Binding> Bindings,
+    MutableArrayRef<DecompositionDeclarator::Binding> Bindings,
     SourceLocation RSquareLoc) {
   assert(!hasName() && "declarator given multiple names!");
 
@@ -317,7 +328,7 @@ void Declarator::setDecompositionBindings(
           new DecompositionDeclarator::Binding[Bindings.size()];
       BindingGroup.DeleteBindings = true;
     }
-    std::uninitialized_copy(Bindings.begin(), Bindings.end(),
+    std::uninitialized_move(Bindings.begin(), Bindings.end(),
                             BindingGroup.Bindings);
   }
 }
@@ -374,8 +385,11 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_void:
     case TST_wchar:
     case TST_BFloat16:
+    case TST_typename_pack_indexing:
 #define GENERIC_IMAGE_TYPE(ImgType, Id) case TST_##ImgType##_t:
 #include "clang/Basic/OpenCLImageTypes.def"
+#define HLSL_INTANGIBLE_TYPE(Name, Id, SingletonId) case TST_##Name:
+#include "clang/Basic/HLSLIntangibleTypes.def"
       return false;
 
     case TST_decltype_auto:
@@ -384,6 +398,7 @@ bool Declarator::isDeclarationOfFunction() const {
       return false;
 
     case TST_decltype:
+    case TST_type_splice:
     case TST_typeof_unqualExpr:
     case TST_typeofExpr:
       if (Expr *E = DS.getRepAsExpr())
@@ -415,6 +430,7 @@ bool Declarator::isDeclarationOfFunction() const {
 bool Declarator::isStaticMember() {
   assert(getContext() == DeclaratorContext::Member);
   return getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static ||
+         (!isDeclarationOfFunction() && !getTemplateParameterLists().empty()) ||
          (getName().getKind() == UnqualifiedIdKind::IK_OperatorFunctionId &&
           CXXMethodDecl::isStaticOverloadedOperator(
               getName().OperatorFunctionId.Operator));
@@ -585,6 +601,8 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
   case DeclSpec::TST_struct:      return "struct";
   case DeclSpec::TST_interface:   return "__interface";
   case DeclSpec::TST_typename:    return "type-name";
+  case DeclSpec::TST_typename_pack_indexing:
+    return "type-name-pack-indexing";
   case DeclSpec::TST_typeofType:
   case DeclSpec::TST_typeofExpr:  return "typeof";
   case DeclSpec::TST_typeof_unqualType:
@@ -592,6 +610,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
   case DeclSpec::TST_auto:        return "auto";
   case DeclSpec::TST_auto_type:   return "__auto_type";
   case DeclSpec::TST_decltype:    return "(decltype)";
+  case DeclSpec::TST_type_splice: return "[:reflection-of-type:]";
   case DeclSpec::TST_decltype_auto: return "decltype(auto)";
 #define TRANSFORM_TYPE_TRAIT_DEF(_, Trait)                                     \
   case DeclSpec::TST_##Trait:                                                  \
@@ -604,6 +623,10 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
   case DeclSpec::TST_##ImgType##_t: \
     return #ImgType "_t";
 #include "clang/Basic/OpenCLImageTypes.def"
+#define HLSL_INTANGIBLE_TYPE(Name, Id, SingletonId)                            \
+  case DeclSpec::TST_##Name:                                                   \
+    return #Name;
+#include "clang/Basic/HLSLIntangibleTypes.def"
   case DeclSpec::TST_error:       return "(error)";
   }
   llvm_unreachable("Unknown typespec!");
@@ -775,6 +798,15 @@ bool DeclSpec::SetTypeSpecType(TST T, SourceLocation TagKwLoc,
   TSTLoc = TagKwLoc;
   TSTNameLoc = TagNameLoc;
   TypeSpecOwned = false;
+
+  if (T == TST_typename_pack_indexing) {
+    // we got there from a an annotation. Reconstruct the type
+    // Ugly...
+    QualType QT = Rep.get();
+    const PackIndexingType *LIT = cast<PackIndexingType>(QT);
+    TypeRep = ParsedType::make(LIT->getPattern());
+    PackIndexingExpr = LIT->getIndexExpr();
+  }
   return false;
 }
 
@@ -973,6 +1005,15 @@ bool DeclSpec::SetBitIntType(SourceLocation KWLoc, Expr *BitsExpr,
   return false;
 }
 
+void DeclSpec::SetPackIndexingExpr(SourceLocation EllipsisLoc,
+                                   Expr *IndexingExpr) {
+  assert(TypeSpecType == TST_typename &&
+         "pack indexing can only be applied to typename");
+  TypeSpecType = TST_typename_pack_indexing;
+  PackIndexingExpr = IndexingExpr;
+  this->EllipsisLoc = EllipsisLoc;
+}
+
 bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
                            unsigned &DiagID, const LangOptions &Lang) {
   // Duplicates are permitted in C99 onwards, but are not permitted in C89 or
@@ -1081,18 +1122,13 @@ bool DeclSpec::setFunctionSpecNoreturn(SourceLocation Loc,
 
 bool DeclSpec::SetFriendSpec(SourceLocation Loc, const char *&PrevSpec,
                              unsigned &DiagID) {
-  if (Friend_specified) {
+  if (isFriendSpecified()) {
     PrevSpec = "friend";
-    // Keep the later location, so that we can later diagnose ill-formed
-    // declarations like 'friend class X friend;'. Per [class.friend]p3,
-    // 'friend' must be the first token in a friend declaration that is
-    // not a function declaration.
-    FriendLoc = Loc;
     DiagID = diag::warn_duplicate_declspec;
     return true;
   }
 
-  Friend_specified = true;
+  FriendSpecifiedFirst = isEmpty();
   FriendLoc = Loc;
   return false;
 }
@@ -1129,7 +1165,7 @@ void DeclSpec::SaveWrittenBuiltinSpecs() {
 }
 
 /// Finish - This does final analysis of the declspec, rejecting things like
-/// "_Imaginary" (lacking an FP type). After calling this method, DeclSpec is
+/// "_Complex" (lacking an FP type). After calling this method, DeclSpec is
 /// guaranteed to be self-consistent, even if an error occurred.
 void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
   // Before possibly changing their values, save specs as written.
@@ -1186,7 +1222,10 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
         !S.Context.getTargetInfo().hasFeature("power8-vector"))
       S.Diag(TSTLoc, diag::err_invalid_vector_int128_decl_spec);
 
-    if (TypeAltiVecBool) {
+    // Complex vector types are not supported.
+    if (TypeSpecComplex != TSC_unspecified)
+      S.Diag(TSCLoc, diag::err_invalid_vector_complex_decl_spec);
+    else if (TypeAltiVecBool) {
       // Sign specifiers are not allowed with vector bool. (PIM 2.1)
       if (getTypeSpecSign() != TypeSpecifierSign::Unspecified) {
         S.Diag(TSSLoc, diag::err_invalid_vector_bool_decl_spec)
@@ -1311,8 +1350,8 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
     break;
   }
 
-  // TODO: if the implementation does not implement _Complex or _Imaginary,
-  // disallow their use.  Need information about the backend.
+  // TODO: if the implementation does not implement _Complex, disallow their
+  // use. Need information about the backend.
   if (TypeSpecComplex != TSC_unspecified) {
     if (TypeSpecType == TST_unspecified) {
       S.Diag(TSCLoc, diag::ext_plain_complex)
@@ -1320,8 +1359,7 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
                               S.getLocForEndOfToken(getTypeSpecComplexLoc()),
                                                  " double");
       TypeSpecType = TST_double;   // _Complex -> _Complex double.
-    } else if (TypeSpecType == TST_int || TypeSpecType == TST_char ||
-               TypeSpecType == TST_bitint) {
+    } else if (TypeSpecType == TST_int || TypeSpecType == TST_char) {
       // Note that this intentionally doesn't include _Complex _Bool.
       if (!S.getLangOpts().CPlusPlus)
         S.Diag(TSTLoc, diag::ext_integer_complex);
@@ -1361,6 +1399,20 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
       ThreadStorageClassSpec = TSCS_unspecified;
       ThreadStorageClassSpecLoc = SourceLocation();
     }
+    if (S.getLangOpts().C23 &&
+        getConstexprSpecifier() == ConstexprSpecKind::Constexpr) {
+      S.Diag(ConstexprLoc, diag::err_invalid_decl_spec_combination)
+          << DeclSpec::getSpecifierName(getThreadStorageClassSpec())
+          << SourceRange(getThreadStorageClassSpecLoc());
+    }
+  }
+
+  if (S.getLangOpts().C23 &&
+      getConstexprSpecifier() == ConstexprSpecKind::Constexpr &&
+      StorageClassSpec == SCS_extern) {
+    S.Diag(ConstexprLoc, diag::err_invalid_decl_spec_combination)
+        << DeclSpec::getSpecifierName(getStorageClassSpec())
+        << SourceRange(getStorageClassSpecLoc());
   }
 
   // If no type specifier was provided and we're parsing a language where
@@ -1378,7 +1430,11 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
   // specifier in a pre-C++11 dialect of C++ or in a pre-C23 dialect of C.
   if (!S.getLangOpts().CPlusPlus11 && !S.getLangOpts().C23 &&
       TypeSpecType == TST_auto)
-    S.Diag(TSTLoc, diag::ext_auto_type_specifier);
+    S.Diag(TSTLoc, diag::ext_auto_type_specifier) << /*C++*/ 0;
+  if (S.getLangOpts().HLSL &&
+      S.getLangOpts().getHLSLVersion() < LangOptions::HLSL_202y &&
+      TypeSpecType == TST_auto)
+    S.Diag(TSTLoc, diag::ext_hlsl_auto_type_specifier) << /*HLSL*/ 1;
   if (S.getLangOpts().CPlusPlus && !S.getLangOpts().CPlusPlus11 &&
       StorageClassSpec == SCS_auto)
     S.Diag(StorageClassSpecLoc, diag::warn_auto_storage_class)

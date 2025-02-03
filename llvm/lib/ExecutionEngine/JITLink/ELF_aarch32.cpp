@@ -200,6 +200,9 @@ private:
 
 protected:
   TargetFlagsType makeTargetFlags(const typename ELFT::Sym &Sym) override {
+    // Only emit target flag for callable symbols
+    if (Sym.getType() != ELF::STT_FUNC)
+      return TargetFlagsType{};
     if (Sym.getValue() & 0x01)
       return aarch32::ThumbSymbol;
     return TargetFlagsType{};
@@ -209,16 +212,20 @@ protected:
                                      TargetFlagsType Flags) override {
     assert((makeTargetFlags(Sym) & Flags) == Flags);
     static constexpr uint64_t ThumbBit = 0x01;
-    return Sym.getValue() & ~ThumbBit;
+    if (Sym.getType() == ELF::STT_FUNC)
+      return Sym.getValue() & ~ThumbBit;
+    return Sym.getValue();
   }
 
 public:
   ELFLinkGraphBuilder_aarch32(StringRef FileName,
-                              const llvm::object::ELFFile<ELFT> &Obj, Triple TT,
-                              SubtargetFeatures Features,
+                              const llvm::object::ELFFile<ELFT> &Obj,
+                              std::shared_ptr<orc::SymbolStringPool> SSP,
+                              Triple TT, SubtargetFeatures Features,
                               aarch32::ArmConfig ArmCfg)
-      : ELFLinkGraphBuilder<ELFT>(Obj, std::move(TT), std::move(Features),
-                                  FileName, getELFAArch32EdgeKindName),
+      : ELFLinkGraphBuilder<ELFT>(Obj, std::move(SSP), std::move(TT),
+                                  std::move(Features), FileName,
+                                  getELFAArch32EdgeKindName),
         ArmCfg(std::move(ArmCfg)) {}
 };
 
@@ -234,8 +241,8 @@ Error buildTables_ELF_aarch32(LinkGraph &G) {
   return Error::success();
 }
 
-Expected<std::unique_ptr<LinkGraph>>
-createLinkGraphFromELFObject_aarch32(MemoryBufferRef ObjectBuffer) {
+Expected<std::unique_ptr<LinkGraph>> createLinkGraphFromELFObject_aarch32(
+    MemoryBufferRef ObjectBuffer, std::shared_ptr<orc::SymbolStringPool> SSP) {
   LLVM_DEBUG({
     dbgs() << "Building jitlink graph for new input "
            << ObjectBuffer.getBufferIdentifier() << "...\n";
@@ -259,21 +266,8 @@ createLinkGraphFromELFObject_aarch32(MemoryBufferRef ObjectBuffer) {
   // Resolve our internal configuration for the target. If at some point the
   // CPUArch alone becomes too unprecise, we can find more details in the
   // Tag_CPU_arch_profile.
-  aarch32::ArmConfig ArmCfg;
-  using namespace ARMBuildAttrs;
-  auto Arch = static_cast<CPUArch>(ARM::getArchAttr(AK));
-  switch (Arch) {
-  case v7:
-  case v8_A:
-    ArmCfg = aarch32::getArmConfigForCPUArch(Arch);
-    assert(ArmCfg.Stubs != aarch32::StubsFlavor::Unsupported &&
-           "Provide a config for each supported CPU");
-    break;
-  default:
-    return make_error<JITLinkError>(
-        "Failed to build ELF link graph: Unsupported CPU arch " +
-        StringRef(aarch32::getCPUArchName(Arch)));
-  }
+  auto Arch = static_cast<ARMBuildAttrs::CPUArch>(ARM::getArchAttr(AK));
+  aarch32::ArmConfig ArmCfg = aarch32::getArmConfigForCPUArch(Arch);
 
   // Populate the link-graph.
   switch (TT.getArch()) {
@@ -281,16 +275,16 @@ createLinkGraphFromELFObject_aarch32(MemoryBufferRef ObjectBuffer) {
   case Triple::thumb: {
     auto &ELFFile = cast<ELFObjectFile<ELF32LE>>(**ELFObj).getELFFile();
     return ELFLinkGraphBuilder_aarch32<llvm::endianness::little>(
-               (*ELFObj)->getFileName(), ELFFile, TT, std::move(*Features),
-               ArmCfg)
+               (*ELFObj)->getFileName(), ELFFile, std::move(SSP), TT,
+               std::move(*Features), ArmCfg)
         .buildGraph();
   }
   case Triple::armeb:
   case Triple::thumbeb: {
     auto &ELFFile = cast<ELFObjectFile<ELF32BE>>(**ELFObj).getELFFile();
     return ELFLinkGraphBuilder_aarch32<llvm::endianness::big>(
-               (*ELFObj)->getFileName(), ELFFile, TT, std::move(*Features),
-               ArmCfg)
+               (*ELFObj)->getFileName(), ELFFile, std::move(SSP), TT,
+               std::move(*Features), ArmCfg)
         .buildGraph();
   }
   default:
@@ -318,11 +312,15 @@ void link_ELF_aarch32(std::unique_ptr<LinkGraph> G,
       PassCfg.PrePrunePasses.push_back(markAllSymbolsLive);
 
     switch (ArmCfg.Stubs) {
+    case aarch32::StubsFlavor::pre_v7:
+      PassCfg.PostPrunePasses.push_back(
+          buildTables_ELF_aarch32<aarch32::StubsManager_prev7>);
+      break;
     case aarch32::StubsFlavor::v7:
       PassCfg.PostPrunePasses.push_back(
           buildTables_ELF_aarch32<aarch32::StubsManager_v7>);
       break;
-    case aarch32::StubsFlavor::Unsupported:
+    case aarch32::StubsFlavor::Undefined:
       llvm_unreachable("Check before building graph");
     }
   }

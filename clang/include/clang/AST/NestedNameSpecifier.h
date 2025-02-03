@@ -1,5 +1,7 @@
 //===- NestedNameSpecifier.h - C++ nested name specifiers -------*- C++ -*-===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -29,6 +31,7 @@ namespace clang {
 
 class ASTContext;
 class CXXRecordDecl;
+class CXXSpliceSpecifierExpr;
 class IdentifierInfo;
 class LangOptions;
 class NamespaceAliasDecl;
@@ -44,8 +47,9 @@ class TypeLoc;
 /// names. For example, "foo::" in "foo::x" is a nested name
 /// specifier. Nested name specifiers are made up of a sequence of
 /// specifiers, each of which can be a namespace, type, identifier
-/// (for dependent names), decltype specifier, or the global specifier ('::').
-/// The last two specifiers can only appear at the start of a
+/// (for dependent names), decltype specifier, expression (for
+/// splice specifiers), or the global specifier ('::').
+/// The last three specifiers can only appear at the start of a
 /// nested-namespace-specifier.
 class NestedNameSpecifier : public llvm::FoldingSetNode {
   /// Enumeration describing
@@ -53,16 +57,17 @@ class NestedNameSpecifier : public llvm::FoldingSetNode {
     StoredIdentifier = 0,
     StoredDecl = 1,
     StoredTypeSpec = 2,
-    StoredTypeSpecWithTemplate = 3
+    StoredTypeSpecWithTemplate = 3,
+    StoredSpliceSpecifier = 4
   };
 
   /// The nested name specifier that precedes this nested name
   /// specifier.
   ///
   /// The pointer is the nested-name-specifier that precedes this
-  /// one. The integer stores one of the first four values of type
+  /// one. The integer stores one of the first five values of type
   /// SpecifierKind.
-  llvm::PointerIntPair<NestedNameSpecifier *, 2, StoredSpecifierKind> Prefix;
+  llvm::PointerIntPair<NestedNameSpecifier *, 3, StoredSpecifierKind> Prefix;
 
   /// The last component in the nested name specifier, which
   /// can be an identifier, a declaration, or a type.
@@ -98,7 +103,10 @@ public:
 
     /// Microsoft's '__super' specifier, stored as a CXXRecordDecl* of
     /// the class it appeared in.
-    Super
+    Super,
+
+    /// A reflection splice specifier, stored as a CXXSpliceSpecifierExpr*.
+    Splice,
   };
 
 private:
@@ -124,7 +132,7 @@ public:
   /// cannot be resolved.
   static NestedNameSpecifier *Create(const ASTContext &Context,
                                      NestedNameSpecifier *Prefix,
-                                     IdentifierInfo *II);
+                                     const IdentifierInfo *II);
 
   /// Builds a nested name specifier that names a namespace.
   static NestedNameSpecifier *Create(const ASTContext &Context,
@@ -134,7 +142,7 @@ public:
   /// Builds a nested name specifier that names a namespace alias.
   static NestedNameSpecifier *Create(const ASTContext &Context,
                                      NestedNameSpecifier *Prefix,
-                                     NamespaceAliasDecl *Alias);
+                                     const NamespaceAliasDecl *Alias);
 
   /// Builds a nested name specifier that names a type.
   static NestedNameSpecifier *Create(const ASTContext &Context,
@@ -148,7 +156,7 @@ public:
   /// nested name specifier, e.g., in "x->Base::f", the "x" has a dependent
   /// type.
   static NestedNameSpecifier *Create(const ASTContext &Context,
-                                     IdentifierInfo *II);
+                                     const IdentifierInfo *II);
 
   /// Returns the nested name specifier representing the global
   /// scope.
@@ -158,6 +166,10 @@ public:
   /// for the given CXXRecordDecl.
   static NestedNameSpecifier *SuperSpecifier(const ASTContext &Context,
                                              CXXRecordDecl *RD);
+
+  /// Returns the nested name specifier representing a splice specifier.
+  static NestedNameSpecifier *SpliceSpecifier(
+          const ASTContext &Context, const CXXSpliceSpecifierExpr *Expr);
 
   /// Return the prefix of this nested name specifier.
   ///
@@ -197,6 +209,14 @@ public:
     if (Prefix.getInt() == StoredTypeSpec ||
         Prefix.getInt() == StoredTypeSpecWithTemplate)
       return (const Type *)Specifier;
+
+    return nullptr;
+  }
+
+  /// Retrieve the splice expression stored in this nested name specifier.
+  const CXXSpliceSpecifierExpr *getAsSpliceExpr() const {
+    if (Prefix.getInt() == StoredSpliceSpecifier)
+      return (const CXXSpliceSpecifierExpr *)Specifier;
 
     return nullptr;
   }
@@ -266,7 +286,7 @@ public:
   explicit operator bool() const { return Qualifier; }
 
   /// Evaluates true when this nested-name-specifier location is
-  /// empty.
+  /// non-empty.
   bool hasQualifier() const { return Qualifier; }
 
   /// Retrieve the nested-name-specifier to which this instance
@@ -334,6 +354,10 @@ public:
   /// For a nested-name-specifier that refers to a type,
   /// retrieve the type with source-location information.
   TypeLoc getTypeLoc() const;
+
+  /// For a nested-name-specifier that refers to a splice expression, retrive
+  /// the expression.
+  const CXXSpliceSpecifierExpr *getSpliceExpr() const;
 
   /// Determines the data length for the entire
   /// nested-name-specifier.
@@ -465,6 +489,19 @@ public:
   /// \param ColonColonLoc The location of the trailing '::'.
   void MakeSuper(ASTContext &Context, CXXRecordDecl *RD,
                  SourceLocation SuperLoc, SourceLocation ColonColonLoc);
+
+  /// Turns this (empty) nested-name-specifier into a specifier having a single
+  /// component of splice specifier kind.
+  ///
+  /// \param Context The AST context in which this nested-name-specifier
+  /// resides.
+  ///
+  /// \param Expr The splice specifier.
+  ///
+  /// \param ColonColonLoc The location of the trailing '::'.
+  void MakeSpliceSpecifier(ASTContext &Context,
+                           const CXXSpliceSpecifierExpr *Expr,
+                           SourceLocation ColonColonLoc);
 
   /// Make a new nested-name-specifier from incomplete source-location
   /// information.

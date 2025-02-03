@@ -349,6 +349,7 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::WChar_S:
   case BuiltinType::WChar_U:
     return TST_wchar;
+  case BuiltinType::MetaInfo:
   case BuiltinType::UChar:
   case BuiltinType::UShort:
   case BuiltinType::UInt:
@@ -399,6 +400,7 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::NullPtr:
   case BuiltinType::Overload:
   case BuiltinType::Dependent:
+  case BuiltinType::UnresolvedTemplate:
   case BuiltinType::BoundMember:
   case BuiltinType::UnknownAny:
   case BuiltinType::ARCUnbridgedCast:
@@ -427,9 +429,13 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
 #include "clang/Basic/RISCVVTypes.def"
 #define WASM_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
 #include "clang/Basic/WebAssemblyReferenceTypes.def"
+#define AMDGPU_TYPE(Name, Id, SingletonId, Width, Align) case BuiltinType::Id:
+#include "clang/Basic/AMDGPUTypes.def"
+#define HLSL_INTANGIBLE_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
+#include "clang/Basic/HLSLIntangibleTypes.def"
   case BuiltinType::BuiltinFn:
   case BuiltinType::IncompleteMatrixIdx:
-  case BuiltinType::OMPArraySection:
+  case BuiltinType::ArraySection:
   case BuiltinType::OMPArrayShaping:
   case BuiltinType::OMPIterator:
     return TST_unspecified;
@@ -514,6 +520,10 @@ SourceRange AttributedTypeLoc::getLocalSourceRange() const {
   // That enclosure doesn't necessarily belong to a single attribute
   // anyway.
   return getAttr() ? getAttr()->getRange() : SourceRange();
+}
+
+SourceRange CountAttributedTypeLoc::getLocalSourceRange() const {
+  return getCountExpr() ? getCountExpr()->getSourceRange() : SourceRange();
 }
 
 SourceRange BTFTagAttributedTypeLoc::getLocalSourceRange() const {
@@ -623,6 +633,12 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(
   }
 }
 
+void ReflectionSpliceTypeLoc::initializeLocal(ASTContext &Context,
+                                              SourceLocation Loc) {
+  setLSpliceLoc(Loc);
+  setRSpliceLoc(Loc);
+}
+
 // Builds a ConceptReference where all locations point at the same token,
 // for use in trivial TypeSourceInfo for constrained AutoType
 static ConceptReference *createTrivialConceptReference(ASTContext &Context,
@@ -717,6 +733,11 @@ namespace {
       return Visit(T.getWrappedLoc());
     }
 
+    TypeLoc
+    VisitHLSLAttributedResourceTypeLoc(HLSLAttributedResourceTypeLoc T) {
+      return Visit(T.getWrappedLoc());
+    }
+
     TypeLoc VisitMacroQualifiedTypeLoc(MacroQualifiedTypeLoc T) {
       return Visit(T.getInnerLoc());
     }
@@ -737,4 +758,13 @@ AutoTypeLoc TypeLoc::getContainedAutoTypeLoc() const {
   if (Res.isNull())
     return AutoTypeLoc();
   return Res.getAs<AutoTypeLoc>();
+}
+
+SourceLocation TypeLoc::getTemplateKeywordLoc() const {
+  if (const auto TSTL = getAsAdjusted<TemplateSpecializationTypeLoc>())
+    return TSTL.getTemplateKeywordLoc();
+  if (const auto DTSTL =
+          getAsAdjusted<DependentTemplateSpecializationTypeLoc>())
+    return DTSTL.getTemplateKeywordLoc();
+  return SourceLocation();
 }

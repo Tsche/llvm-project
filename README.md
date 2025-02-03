@@ -1,3 +1,10 @@
+# Clang/P2996: An LLVM fork
+
+Welcome to Clang/P2996, a fork of the [`llvm/llvm-project`](
+https://github.com/llvm/llvm-project) implementing experimental support for ISO
+C++ proposal [P2996](https://wg21.link/p2996) in `clang`. Please see [P2996.md](
+P2996.md) for more about this project.
+
 # The LLVM Compiler Infrastructure
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/llvm/llvm-project/badge)](https://securityscorecards.dev/viewer/?uri=github.com/llvm/llvm-project)
@@ -16,7 +23,7 @@ files needed to process intermediate representations and convert them into
 object files. Tools include an assembler, disassembler, bitcode analyzer, and
 bitcode optimizer.
 
-C-like languages use the [Clang](http://clang.llvm.org/) frontend. This
+C-like languages use the [Clang](https://clang.llvm.org/) frontend. This
 component compiles C, C++, Objective-C, and Objective-C++ code into LLVM bitcode
 -- and from there into object files, using LLVM.
 

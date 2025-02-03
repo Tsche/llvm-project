@@ -297,6 +297,11 @@ toNestedNameSpecifierDependendence(TypeDependence D) {
   return Dependence(D).nestedNameSpecifier();
 }
 
+inline NestedNameSpecifierDependence
+toNestedNameSpecifierDependence(ExprDependence E) {
+  return Dependence(E).nestedNameSpecifier();
+}
+
 inline TemplateArgumentDependence
 toTemplateArgumentDependence(TypeDependence D) {
   return Dependence(D).templateArgument();
@@ -312,6 +317,11 @@ toTemplateArgumentDependence(ExprDependence D) {
 
 inline TemplateNameDependence
 toTemplateNameDependence(NestedNameSpecifierDependence D) {
+  return Dependence(D).templateName();
+}
+
+inline TemplateNameDependence
+toTemplateNameDependence(TemplateArgumentDependence D) {
   return Dependence(D).templateName();
 }
 

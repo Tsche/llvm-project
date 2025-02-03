@@ -1,5 +1,7 @@
 //===- Lexer.cpp - C Language Family Lexer --------------------------------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -32,7 +34,6 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ConvertUTF.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/NativeFormatting.h"
 #include "llvm/Support/Unicode.h"
@@ -72,6 +73,51 @@ tok::ObjCKeywordKind Token::getObjCKeywordID() const {
     return tok::objc_not_keyword;
   const IdentifierInfo *specId = getIdentifierInfo();
   return specId ? specId->getObjCKeywordID() : tok::objc_not_keyword;
+}
+
+/// Determine whether the token kind starts a simple-type-specifier.
+bool Token::isSimpleTypeSpecifier(const LangOptions &LangOpts) const {
+  switch (getKind()) {
+  case tok::annot_typename:
+  case tok::annot_decltype:
+  case tok::annot_pack_indexing_type:
+    return true;
+
+  case tok::kw_short:
+  case tok::kw_long:
+  case tok::kw___int64:
+  case tok::kw___int128:
+  case tok::kw_signed:
+  case tok::kw_unsigned:
+  case tok::kw_void:
+  case tok::kw_char:
+  case tok::kw_int:
+  case tok::kw_half:
+  case tok::kw_float:
+  case tok::kw_double:
+  case tok::kw___bf16:
+  case tok::kw__Float16:
+  case tok::kw___float128:
+  case tok::kw___ibm128:
+  case tok::kw_wchar_t:
+  case tok::kw_bool:
+  case tok::kw__Bool:
+  case tok::kw__Accum:
+  case tok::kw__Fract:
+  case tok::kw__Sat:
+#define TRANSFORM_TYPE_TRAIT_DEF(_, Trait) case tok::kw___##Trait:
+#include "clang/Basic/TransformTypeTraits.def"
+  case tok::kw___auto_type:
+  case tok::kw_char16_t:
+  case tok::kw_char32_t:
+  case tok::kw_typeof:
+  case tok::kw_decltype:
+  case tok::kw_char8_t:
+    return getIdentifierInfo()->isKeyword(LangOpts);
+
+  default:
+    return false;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -483,7 +529,7 @@ bool Lexer::getRawToken(SourceLocation Loc, Token &Result,
 
   const char *StrData = Buffer.data()+LocInfo.second;
 
-  if (!IgnoreWhiteSpace && isWhitespace(StrData[0]))
+  if (!IgnoreWhiteSpace && isWhitespace(SkipEscapedNewLines(StrData)[0]))
     return true;
 
   // Create a lexer starting at the beginning of this token.
@@ -2216,8 +2262,17 @@ bool Lexer::LexRawStringLiteral(Token &Result, const char *CurPtr,
 
   unsigned PrefixLen = 0;
 
-  while (PrefixLen != 16 && isRawStringDelimBody(CurPtr[PrefixLen]))
+  while (PrefixLen != 16 && isRawStringDelimBody(CurPtr[PrefixLen])) {
+    if (!isLexingRawMode() &&
+        llvm::is_contained({'$', '@', '`'}, CurPtr[PrefixLen])) {
+      const char *Pos = &CurPtr[PrefixLen];
+      Diag(Pos, LangOpts.CPlusPlus26
+                    ? diag::warn_cxx26_compat_raw_string_literal_character_set
+                    : diag::ext_cxx26_raw_string_literal_character_set)
+          << StringRef(Pos, 1);
+    }
     ++PrefixLen;
+  }
 
   // If the last character was not a '(', then we didn't lex a valid delimiter.
   if (CurPtr[PrefixLen] != '(') {
@@ -2225,6 +2280,8 @@ bool Lexer::LexRawStringLiteral(Token &Result, const char *CurPtr,
       const char *PrefixEnd = &CurPtr[PrefixLen];
       if (PrefixLen == 16) {
         Diag(PrefixEnd, diag::err_raw_delim_too_long);
+      } else if (*PrefixEnd == '\n') {
+        Diag(PrefixEnd, diag::err_invalid_newline_raw_delim);
       } else {
         Diag(PrefixEnd, diag::err_invalid_char_raw_delim)
           << StringRef(PrefixEnd, 1);
@@ -2372,7 +2429,9 @@ bool Lexer::LexCharConstant(Token &Result, const char *CurPtr,
                           ? diag::warn_cxx98_compat_unicode_literal
                           : diag::warn_c99_compat_unicode_literal);
     else if (Kind == tok::utf8_char_constant)
-      Diag(BufferPtr, diag::warn_cxx14_compat_u8_character_literal);
+      Diag(BufferPtr, LangOpts.CPlusPlus
+                          ? diag::warn_cxx14_compat_u8_character_literal
+                          : diag::warn_c17_compat_u8_character_literal);
   }
 
   char C = getAndAdvanceChar(CurPtr, Result);
@@ -3820,7 +3879,7 @@ LexStart:
                                tok::utf16_char_constant);
 
       // UTF-16 raw string literal
-      if (Char == 'R' && LangOpts.CPlusPlus11 &&
+      if (Char == 'R' && LangOpts.RawStringLiterals &&
           getCharAndSize(CurPtr + SizeTmp, SizeTmp2) == '"')
         return LexRawStringLiteral(Result,
                                ConsumeChar(ConsumeChar(CurPtr, SizeTmp, Result),
@@ -3842,7 +3901,7 @@ LexStart:
                                   SizeTmp2, Result),
               tok::utf8_char_constant);
 
-        if (Char2 == 'R' && LangOpts.CPlusPlus11) {
+        if (Char2 == 'R' && LangOpts.RawStringLiterals) {
           unsigned SizeTmp3;
           char Char3 = getCharAndSize(CurPtr + SizeTmp + SizeTmp2, SizeTmp3);
           // UTF-8 raw string literal
@@ -3878,7 +3937,7 @@ LexStart:
                                tok::utf32_char_constant);
 
       // UTF-32 raw string literal
-      if (Char == 'R' && LangOpts.CPlusPlus11 &&
+      if (Char == 'R' && LangOpts.RawStringLiterals &&
           getCharAndSize(CurPtr + SizeTmp, SizeTmp2) == '"')
         return LexRawStringLiteral(Result,
                                ConsumeChar(ConsumeChar(CurPtr, SizeTmp, Result),
@@ -3893,7 +3952,7 @@ LexStart:
     // Notify MIOpt that we read a non-whitespace/non-comment token.
     MIOpt.ReadToken();
 
-    if (LangOpts.CPlusPlus11) {
+    if (LangOpts.RawStringLiterals) {
       Char = getCharAndSize(CurPtr, SizeTmp);
 
       if (Char == '"')
@@ -3916,7 +3975,7 @@ LexStart:
                               tok::wide_string_literal);
 
     // Wide raw string literal.
-    if (LangOpts.CPlusPlus11 && Char == 'R' &&
+    if (LangOpts.RawStringLiterals && Char == 'R' &&
         getCharAndSize(CurPtr + SizeTmp, SizeTmp2) == '"')
       return LexRawStringLiteral(Result,
                                ConsumeChar(ConsumeChar(CurPtr, SizeTmp, Result),
@@ -3974,9 +4033,39 @@ LexStart:
   case '?':
     Kind = tok::question;
     break;
-  case '[':
-    Kind = tok::l_square;
+  case '[': {
+    size_t SuccessiveColons = 0;
+
+    // There may be as many as 3 successive colons:
+    // - `[: ...` for an 'l_splice' token.
+    // - `[:: ...` for an 'l_square' token followed by a 'coloncolon' token.
+    // - `[: :: ...` for an 'l_splice' token followed by a 'coloncolon' token.
+    Char = getCharAndSize(CurPtr, SizeTmp);
+    SizeTmp2 = 0;
+    while (Char == ':' && SuccessiveColons <= 3) {
+      unsigned SizeTmp3;
+      Char = getCharAndSize(CurPtr + SizeTmp + SizeTmp2, SizeTmp3);
+      SizeTmp2 += SizeTmp3;
+
+      if (Char != '>')  // Check for ':>'-digraph.
+        ++SuccessiveColons;
+    }
+
+    // Every `[:`-pattern except for `[::` indicates an `l_splice` token.
+    if (SuccessiveColons > 0 && SuccessiveColons != 2) {
+      if (LangOpts.Reflection) {
+        Kind = tok::l_splice;
+        CurPtr += SizeTmp;
+      } else {
+        if (!isLexingRawMode() && !LangOpts.OpenMP && !LangOpts.OpenACC)
+          Diag(CurPtr, diag::warn_reflection_disabled) << "[:";
+        Kind = tok::l_square;
+      }
+    } else {
+      Kind = tok::l_square;
+    }
     break;
+  }
   case ']':
     Kind = tok::r_square;
     break;
@@ -4267,10 +4356,12 @@ LexStart:
     if (Char == '=') {
       CurPtr = ConsumeChar(CurPtr, SizeTmp, Result);
       Kind = tok::caretequal;
-    } else if (LangOpts.OpenCL && Char == '^') {
+    } else if (LangOpts.Reflection && Char == '^') {
       CurPtr = ConsumeChar(CurPtr, SizeTmp, Result);
       Kind = tok::caretcaret;
     } else {
+      if (LangOpts.OpenCL && Char == '^')
+        Diag(CurPtr, diag::err_opencl_logical_exclusive_or);
       Kind = tok::caret;
     }
     break;
@@ -4297,6 +4388,15 @@ LexStart:
     } else if (Char == ':') {
       Kind = tok::coloncolon;
       CurPtr = ConsumeChar(CurPtr, SizeTmp, Result);
+    } else if (Char == ']') {
+      if (LangOpts.Reflection) {
+        Kind = tok::r_splice;
+        CurPtr = ConsumeChar(CurPtr, SizeTmp, Result);
+      } else {
+        if (!isLexingRawMode() && !LangOpts.OpenMP && !LangOpts.OpenACC)
+          Diag(BufferPtr, diag::warn_reflection_disabled) << ":]";
+        Kind = tok::colon;
+      }
     } else {
       Kind = tok::colon;
     }
@@ -4591,4 +4691,70 @@ bool Lexer::LexDependencyDirectiveTokenWhileSkipping(Token &Result) {
 
   convertDependencyDirectiveToken(DDTok, Result);
   return false;
+}
+
+bool Lexer::validateIdentifier(const std::string &In) {
+  static const llvm::sys::UnicodeCharRange DigitRanges[] = {
+    {0x0030, 0x0039}
+  };
+  static llvm::sys::UnicodeCharRange NondigitRanges[] = {
+    {0x0041, 0x005A}, {0x005F, 0x005F}, {0x0061, 0x007A}
+  };
+  static const llvm::sys::UnicodeCharSet DigitChars(DigitRanges);
+  static const llvm::sys::UnicodeCharSet NondigitChars(NondigitRanges);
+  static const llvm::sys::UnicodeCharSet XIDStartChars(XIDStartRanges);
+  static const llvm::sys::UnicodeCharSet XIDContinueChars(XIDContinueRanges);
+
+  if (In.size() == 0)
+    return false;
+
+  const auto *Cursor = &In[0];
+  const auto *End = Cursor + In.size();
+
+  // Validate leading character.
+  if (*Cursor == '\\') {
+    const char *SlashLoc = Cursor++;
+    std::optional<uint32_t> UCN = tryReadUCN(Cursor, SlashLoc, nullptr);
+    if (!UCN || !XIDStartChars.contains(UCN.value()))
+      return false;
+  } else {
+    llvm::UTF32 CodePoint;
+
+    if (llvm::conversionOK != llvm::convertUTF8Sequence(
+            reinterpret_cast<const llvm::UTF8 **>(&Cursor),
+            reinterpret_cast<const llvm::UTF8 *>(End), &CodePoint,
+            llvm::ConversionFlags::strictConversion))
+      return false;
+
+    if (!NondigitChars.contains(CodePoint) &&
+        !XIDStartChars.contains(CodePoint))
+        return false;
+  }
+
+  // Validate remaining characters.
+  while (Cursor < End) {
+    if (*Cursor == '\\') {
+      const char *SlashLoc = Cursor++;
+      std::optional<uint32_t> UCN = tryReadUCN(Cursor, SlashLoc, nullptr);
+      if (!UCN || !(XIDStartChars.contains(UCN.value()) ||
+                    XIDContinueChars.contains(UCN.value())))
+        return false;
+    } else {
+      llvm::UTF32 CodePoint;
+
+      if (llvm::conversionOK != llvm::convertUTF8Sequence(
+              reinterpret_cast<const llvm::UTF8 **>(&Cursor),
+              reinterpret_cast<const llvm::UTF8 *>(End), &CodePoint,
+              llvm::ConversionFlags::strictConversion))
+          return false;
+
+      if (!DigitChars.contains(CodePoint) &&
+          !NondigitChars.contains(CodePoint) &&
+          !XIDStartChars.contains(CodePoint) &&
+          !XIDContinueChars.contains(CodePoint))
+        return false;
+    }
+  }
+  assert(Cursor == End);
+  return true;
 }

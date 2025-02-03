@@ -1,5 +1,7 @@
 //===- ComputeDependence.cpp ----------------------------------------------===//
 //
+// Copyright 2024 Bloomberg Finance L.P.
+//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -22,7 +24,9 @@
 using namespace clang;
 
 ExprDependence clang::computeDependence(FullExpr *E) {
-  return E->getSubExpr()->getDependence();
+  if (Expr *Sub = E->getSubExpr())
+    return Sub->getDependence();
+  return ExprDependence::None;
 }
 
 ExprDependence clang::computeDependence(OpaqueValueExpr *E) {
@@ -164,7 +168,7 @@ ExprDependence clang::computeDependence(BinaryOperator *E) {
 ExprDependence clang::computeDependence(ConditionalOperator *E) {
   // The type of the conditional operator depends on the type of the conditional
   // to support the GCC vector conditional extension. Additionally,
-  // [temp.dep.expr] does specify state that this should be dependent on ALL sub
+  // [temp.dep.expr] does specify that this should be dependent on ALL sub
   // expressions.
   return E->getCond()->getDependence() | E->getLHS()->getDependence() |
          E->getRHS()->getDependence();
@@ -252,10 +256,13 @@ ExprDependence clang::computeDependence(ExtVectorElementExpr *E) {
   return E->getBase()->getDependence();
 }
 
-ExprDependence clang::computeDependence(BlockExpr *E) {
+ExprDependence clang::computeDependence(BlockExpr *E,
+                                        bool ContainsUnexpandedParameterPack) {
   auto D = toExprDependenceForImpliedType(E->getType()->getDependence());
   if (E->getBlockDecl()->isDependentContext())
     D |= ExprDependence::Instantiation;
+  if (ContainsUnexpandedParameterPack)
+    D |= ExprDependence::UnexpandedPack;
   return D;
 }
 
@@ -310,6 +317,16 @@ ExprDependence clang::computeDependence(CXXThisExpr *E) {
   // 'this' is type-dependent if the class type of the enclosing
   // member function is dependent (C++ [temp.dep.expr]p2)
   auto D = toExprDependenceForImpliedType(E->getType()->getDependence());
+
+  // If a lambda with an explicit object parameter captures '*this', then
+  // 'this' now refers to the captured copy of lambda, and if the lambda
+  // is type-dependent, so is the object and thus 'this'.
+  //
+  // Note: The standard does not mention this case explicitly, but we need
+  // to do this so we can mark NSDM accesses as dependent.
+  if (E->isCapturedByCopyInLambdaWithExplicitObjectParameter())
+    D |= ExprDependence::Type;
+
   assert(!(D & ExprDependence::UnexpandedPack));
   return D;
 }
@@ -362,6 +379,27 @@ ExprDependence clang::computeDependence(CXXNoexceptExpr *E, CanThrowResult CT) {
 ExprDependence clang::computeDependence(PackExpansionExpr *E) {
   return (E->getPattern()->getDependence() & ~ExprDependence::UnexpandedPack) |
          ExprDependence::TypeValueInstantiation;
+}
+
+ExprDependence clang::computeDependence(PackIndexingExpr *E) {
+
+  ExprDependence PatternDep = E->getPackIdExpression()->getDependence() &
+                              ~ExprDependence::UnexpandedPack;
+
+  ExprDependence D = E->getIndexExpr()->getDependence();
+  if (D & ExprDependence::TypeValueInstantiation)
+    D |= E->getIndexExpr()->getDependence() | PatternDep |
+         ExprDependence::Instantiation;
+
+  ArrayRef<Expr *> Exprs = E->getExpressions();
+  if (Exprs.empty() || !E->isFullySubstituted())
+    D |= PatternDep | ExprDependence::Instantiation;
+  else if (!E->getIndexExpr()->isInstantiationDependent()) {
+    std::optional<unsigned> Index = E->getSelectedIndex();
+    assert(Index && *Index < Exprs.size() && "pack index out of bound");
+    D |= Exprs[*Index]->getDependence();
+  }
+  return D;
 }
 
 ExprDependence clang::computeDependence(SubstNonTypeTemplateParmExpr *E) {
@@ -418,12 +456,17 @@ ExprDependence clang::computeDependence(ObjCIndirectCopyRestoreExpr *E) {
   return E->getSubExpr()->getDependence();
 }
 
-ExprDependence clang::computeDependence(OMPArraySectionExpr *E) {
+ExprDependence clang::computeDependence(ArraySectionExpr *E) {
   auto D = E->getBase()->getDependence();
   if (auto *LB = E->getLowerBound())
     D |= LB->getDependence();
   if (auto *Len = E->getLength())
     D |= Len->getDependence();
+
+  if (E->isOMPArraySection()) {
+    if (auto *Stride = E->getStride())
+      D |= Stride->getDependence();
+  }
   return D;
 }
 
@@ -455,57 +498,17 @@ ExprDependence clang::computeDependence(OMPIteratorExpr *E) {
   return D;
 }
 
-/// Compute the type-, value-, and instantiation-dependence of a
-/// declaration reference
-/// based on the declaration being referenced.
-ExprDependence clang::computeDependence(DeclRefExpr *E, const ASTContext &Ctx) {
+static ExprDependence computeDeclDependence(ValueDecl *D,
+                                            const ASTContext &Ctx) {
   auto Deps = ExprDependence::None;
 
-  if (auto *NNS = E->getQualifier())
-    Deps |= toExprDependence(NNS->getDependence() &
-                             ~NestedNameSpecifierDependence::Dependent);
-
-  if (auto *FirstArg = E->getTemplateArgs()) {
-    unsigned NumArgs = E->getNumTemplateArgs();
-    for (auto *Arg = FirstArg, *End = FirstArg + NumArgs; Arg < End; ++Arg)
-      Deps |= toExprDependence(Arg->getArgument().getDependence());
-  }
-
-  auto *Decl = E->getDecl();
-  auto Type = E->getType();
-
-  if (Decl->isParameterPack())
+  if (D->isParameterPack())
     Deps |= ExprDependence::UnexpandedPack;
-  Deps |= toExprDependenceForImpliedType(Type->getDependence()) &
-          ExprDependence::Error;
-
-  // C++ [temp.dep.expr]p3:
-  //   An id-expression is type-dependent if it contains:
-
-  //    - an identifier associated by name lookup with one or more declarations
-  //      declared with a dependent type
-  //    - an identifier associated by name lookup with an entity captured by
-  //    copy ([expr.prim.lambda.capture])
-  //      in a lambda-expression that has an explicit object parameter whose
-  //      type is dependent ([dcl.fct]),
-  //
-  // [The "or more" case is not modeled as a DeclRefExpr. There are a bunch
-  // more bullets here that we handle by treating the declaration as having a
-  // dependent type if they involve a placeholder type that can't be deduced.]
-  if (Type->isDependentType())
-    Deps |= ExprDependence::TypeValueInstantiation;
-  else if (Type->isInstantiationDependentType())
-    Deps |= ExprDependence::Instantiation;
-
-  //    - an identifier associated by name lookup with an entity captured by
-  //    copy ([expr.prim.lambda.capture])
-  if (E->isCapturedByCopyInLambdaWithExplicitObjectParameter())
-    Deps |= ExprDependence::Type;
 
   //    - a conversion-function-id that specifies a dependent type
-  if (Decl->getDeclName().getNameKind() ==
+  if (D->getDeclName().getNameKind() ==
       DeclarationName::CXXConversionFunctionName) {
-    QualType T = Decl->getDeclName().getCXXNameType();
+    QualType T = D->getDeclName().getCXXNameType();
     if (T->isDependentType())
       return Deps | ExprDependence::TypeValueInstantiation;
 
@@ -528,12 +531,12 @@ ExprDependence clang::computeDependence(DeclRefExpr *E, const ASTContext &Ctx) {
   //    - it is type-dependent [handled above]
 
   //    - it is the name of a non-type template parameter,
-  if (isa<NonTypeTemplateParmDecl>(Decl))
+  if (isa<NonTypeTemplateParmDecl>(D))
     return Deps | ExprDependence::ValueInstantiation;
 
   //   - it names a potentially-constant variable that is initialized with an
   //     expression that is value-dependent
-  if (const auto *Var = dyn_cast<VarDecl>(Decl)) {
+  if (const auto *Var = dyn_cast<VarDecl>(D)) {
     if (const Expr *Init = Var->getAnyInitializer()) {
       if (Init->containsErrors())
         Deps |= ExprDependence::Error;
@@ -567,10 +570,59 @@ ExprDependence clang::computeDependence(DeclRefExpr *E, const ASTContext &Ctx) {
   // effect: any use of a non-static member function name requires either
   // forming a pointer-to-member or providing an object parameter, either of
   // which makes the overall expression value-dependent.
-  if (auto *MD = dyn_cast<CXXMethodDecl>(Decl)) {
-    if (MD->isStatic() && Decl->getDeclContext()->isDependentContext())
+  if (auto *MD = dyn_cast<CXXMethodDecl>(D)) {
+    if (MD->isStatic() && D->getDeclContext()->isDependentContext())
       Deps |= ExprDependence::ValueInstantiation;
   }
+
+  return Deps;
+}
+
+/// Compute the type-, value-, and instantiation-dependence of a
+/// declaration reference
+/// based on the declaration being referenced.
+ExprDependence clang::computeDependence(DeclRefExpr *E, const ASTContext &Ctx) {
+  auto Deps = ExprDependence::None;
+
+  if (auto *NNS = E->getQualifier())
+    Deps |= toExprDependence(NNS->getDependence() &
+                             ~NestedNameSpecifierDependence::Dependent);
+
+  if (auto *FirstArg = E->getTemplateArgs()) {
+    unsigned NumArgs = E->getNumTemplateArgs();
+    for (auto *Arg = FirstArg, *End = FirstArg + NumArgs; Arg < End; ++Arg)
+      Deps |= toExprDependence(Arg->getArgument().getDependence());
+  }
+
+  auto Type = E->getType();
+
+  Deps |= toExprDependenceForImpliedType(Type->getDependence()) &
+          ExprDependence::Error;
+
+  // C++ [temp.dep.expr]p3:
+  //   An id-expression is type-dependent if it contains:
+
+  //    - an identifier associated by name lookup with one or more declarations
+  //      declared with a dependent type
+  //    - an identifier associated by name lookup with an entity captured by
+  //    copy ([expr.prim.lambda.capture])
+  //      in a lambda-expression that has an explicit object parameter whose
+  //      type is dependent ([dcl.fct]),
+  //
+  // [The "or more" case is not modeled as a DeclRefExpr. There are a bunch
+  // more bullets here that we handle by treating the declaration as having a
+  // dependent type if they involve a placeholder type that can't be deduced.]
+  if (Type->isDependentType())
+    Deps |= ExprDependence::TypeValueInstantiation;
+  else if (Type->isInstantiationDependentType())
+    Deps |= ExprDependence::Instantiation;
+
+  //    - an identifier associated by name lookup with an entity captured by
+  //    copy ([expr.prim.lambda.capture])
+  if (E->isCapturedByCopyInLambdaWithExplicitObjectParameter())
+    Deps |= ExprDependence::Type;
+
+  Deps |= computeDeclDependence(E->getDecl(), Ctx);
 
   return Deps;
 }
@@ -639,6 +691,9 @@ ExprDependence clang::computeDependence(MemberExpr *E) {
     D |= toExprDependence(NNS->getDependence() &
                           ~NestedNameSpecifierDependence::Dependent);
 
+  for (const auto &A : E->template_arguments())
+    D |= toExprDependence(A.getArgument().getDependence());
+
   auto *MemberDecl = E->getMemberDecl();
   if (FieldDecl *FD = dyn_cast<FieldDecl>(MemberDecl)) {
     DeclContext *DC = MemberDecl->getDeclContext();
@@ -655,7 +710,6 @@ ExprDependence clang::computeDependence(MemberExpr *E) {
       D |= ExprDependence::Type;
     }
   }
-  // FIXME: move remaining dependence computation from MemberExpr::Create()
   return D;
 }
 
@@ -888,6 +942,120 @@ ExprDependence clang::computeDependence(ConceptSpecializationExpr *E,
   return Res;
 }
 
+ExprDependence clang::computeDependence(CXXReflectExpr *E,
+                                        const ASTContext &Ctx) {
+  if (E->hasDependentSubExpr())
+    return E->getDependentSubExpr()->getDependence();
+
+  APValue RV = E->getReflection();
+  ExprDependence D = ExprDependence::None;
+  switch (RV.getReflectionKind()) {
+  case ReflectionKind::Type: {
+    QualType T = RV.getReflectedType();
+
+    if (T->isDependentType())
+      D |= ExprDependence::ValueInstantiation;
+    if (T->containsUnexpandedParameterPack())
+      D |= ExprDependence::UnexpandedPack;
+    return D;
+  }
+  case ReflectionKind::Declaration: {
+    ValueDecl *VD = RV.getReflectedDecl();
+    if (VD->getType()->isDependentType())
+      D |= ExprDependence::ValueInstantiation;
+    if (VD->getType()->containsUnexpandedParameterPack())
+      D |= ExprDependence::UnexpandedPack;
+    return D | computeDeclDependence(VD, Ctx);
+  }
+  case ReflectionKind::Template: {
+    const TemplateName Template = RV.getReflectedTemplate();
+
+    if (Template.isDependent())
+      D |= ExprDependence::ValueInstantiation;
+    if (Template.isInstantiationDependent())
+      D |= ExprDependence::Instantiation;
+    if (Template.containsUnexpandedParameterPack())
+      D |= ExprDependence::UnexpandedPack;
+    return D;
+  }
+  case ReflectionKind::Annotation: {
+    D |= RV.getReflectedAnnotation()->getArg()->getDependence();
+    return D;
+  }
+  case ReflectionKind::Null:
+  case ReflectionKind::Object:
+  case ReflectionKind::Value:
+  case ReflectionKind::Namespace:
+  case ReflectionKind::BaseSpecifier:
+  case ReflectionKind::DataMemberSpec:
+    return ExprDependence::None;
+  }
+  llvm_unreachable("unknown reflection kind while computing dependence");
+}
+
+ExprDependence clang::computeDependence(CXXMetafunctionExpr *E) {
+    auto D = ExprDependence::None;
+    for (unsigned I = 0; I < E->getNumArgs(); ++I) {
+      Expr *Arg = E->getArg(I);
+      D |= Arg->getDependence();
+    }
+    return D & ~ExprDependence::UnexpandedPack;
+}
+
+
+ExprDependence clang::computeDependence(CXXSpliceSpecifierExpr *E) {
+  return E->getOperand()->getDependence();
+}
+
+ExprDependence clang::computeDependence(CXXSpliceExpr *E) {
+  auto D = E->getOperand()->getDependence();
+  if (D & ExprDependence::Value)
+    D |= ExprDependence::Type;
+  return D;
+}
+
+ExprDependence clang::computeDependence(CXXDependentMemberSpliceExpr *E) {
+  auto D = ExprDependence::None;
+  if (E->getBase()->containsErrors() || E->getRHS()->containsErrors())
+    D |= ExprDependence::Error;
+  else
+    D |= E->getBase()->getDependence() | E->getRHS()->getDependence();
+
+  if (D & ExprDependence::Value)
+    D |= ExprDependence::Type;
+  return D;
+}
+
+ExprDependence clang::computeDependence(StackLocationExpr *E) {
+  return ExprDependence::None;
+}
+
+ExprDependence clang::computeDependence(ExtractLValueExpr *E) {
+  return ExprDependence::None;
+}
+
+ExprDependence clang::computeDependence(CXXExpansionInitListExpr *E) {
+  auto D = ExprDependence::None;
+  for (auto *SubExpr : E->getSubExprs())
+    D |= SubExpr->getDependence();
+  return D;
+}
+
+ExprDependence clang::computeDependence(CXXExpansionInitListSelectExpr *E) {
+  auto D = E->getRange()->getDependence() | E->getIdx()->getDependence();
+  if (D & ExprDependence::Value)
+    D |= ExprDependence::Type;
+  return D;
+}
+
+ExprDependence clang::computeDependence(
+        CXXDestructurableExpansionSelectExpr *E) {
+  auto D = E->getRange()->getDependence() | E->getIdx()->getDependence();
+  if (D & ExprDependence::Value)
+    D |= ExprDependence::Type;
+  return D;
+}
+
 ExprDependence clang::computeDependence(ObjCArrayLiteral *E) {
   auto D = ExprDependence::None;
   Expr **Elements = E->getElements();
@@ -918,4 +1086,10 @@ ExprDependence clang::computeDependence(ObjCMessageExpr *E) {
   for (auto *A : E->arguments())
     D |= A->getDependence();
   return D;
+}
+
+ExprDependence clang::computeDependence(OpenACCAsteriskSizeExpr *E) {
+  // This represents a simple asterisk as typed, so cannot be dependent in any
+  // way.
+  return ExprDependence::None;
 }

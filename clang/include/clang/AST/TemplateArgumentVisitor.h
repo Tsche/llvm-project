@@ -37,6 +37,7 @@ public:
       DISPATCH(Declaration);
       DISPATCH(NullPtr);
       DISPATCH(Integral);
+      DISPATCH(SpliceSpecifier);
       DISPATCH(StructuralValue);
       DISPATCH(Template);
       DISPATCH(TemplateExpansion);
@@ -52,7 +53,8 @@ public:
 #define VISIT_METHOD(CATEGORY)                                                 \
   RetTy Visit##CATEGORY##TemplateArgument(REF(TemplateArgument) TA,            \
                                           ParamTys... P) {                     \
-    return VisitTemplateArgument(TA, std::forward<ParamTys>(P)...);            \
+    return static_cast<ImplClass *>(this)->VisitTemplateArgument(              \
+        TA, std::forward<ParamTys>(P)...);                                     \
   }
 
   VISIT_METHOD(Null);
@@ -60,6 +62,7 @@ public:
   VISIT_METHOD(Declaration);
   VISIT_METHOD(NullPtr);
   VISIT_METHOD(Integral);
+  VISIT_METHOD(SpliceSpecifier);
   VISIT_METHOD(StructuralValue);
   VISIT_METHOD(Template);
   VISIT_METHOD(TemplateExpansion);

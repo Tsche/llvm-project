@@ -213,9 +213,9 @@ public:
   }
 
   Qualifiers readQualifiers() {
-    static_assert(sizeof(Qualifiers().getAsOpaqueValue()) <= sizeof(uint32_t),
+    static_assert(sizeof(Qualifiers().getAsOpaqueValue()) <= sizeof(uint64_t),
                   "update this if the value size changes");
-    uint32_t value = asImpl().readUInt32();
+    uint64_t value = asImpl().readUInt64();
     return Qualifiers::fromOpaqueValue(value);
   }
 
@@ -242,6 +242,15 @@ public:
                   "opaque value doesn't fit into uint32_t");
     uint32_t value = asImpl().readUInt32();
     return FunctionProtoType::ExtParameterInfo::getFromOpaqueValue(value);
+  }
+
+  FunctionEffect readFunctionEffect() {
+    uint32_t value = asImpl().readUInt32();
+    return FunctionEffect::fromOpaqueInt32(value);
+  }
+
+  EffectConditionExpr readEffectConditionExpr() {
+    return EffectConditionExpr{asImpl().readExprRef()};
   }
 
   NestedNameSpecifier *readNestedNameSpecifier() {
@@ -283,6 +292,13 @@ public:
       case NestedNameSpecifier::Super:
         cur = NestedNameSpecifier::SuperSpecifier(ctx,
                                             asImpl().readCXXRecordDeclRef());
+        continue;
+
+      case NestedNameSpecifier::Splice:
+        cur = NestedNameSpecifier::SpliceSpecifier(
+                ctx,
+                reinterpret_cast<CXXSpliceSpecifierExpr *>(
+                      asImpl().readExprRef()));
         continue;
       }
       llvm_unreachable("bad nested name specifier kind");

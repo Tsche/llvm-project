@@ -109,6 +109,8 @@ protected:
 
   //===--- Statement bitfields classes ---===//
 
+  #define NumStmtBits 9
+
   class StmtBitfields {
     friend class ASTStmtReader;
     friend class ASTStmtWriter;
@@ -116,9 +118,8 @@ protected:
 
     /// The statement class.
     LLVM_PREFERRED_TYPE(StmtClass)
-    unsigned sClass : 8;
+    unsigned sClass : NumStmtBits;
   };
-  enum { NumStmtBits = 8 };
 
   class NullStmtBitfields {
     friend class ASTStmtReader;
@@ -358,10 +359,12 @@ protected:
     unsigned ValueKind : 2;
     LLVM_PREFERRED_TYPE(ExprObjectKind)
     unsigned ObjectKind : 3;
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned IsImmediateEscalating : 1;
     LLVM_PREFERRED_TYPE(ExprDependence)
     unsigned Dependent : llvm::BitWidth<ExprDependence>;
   };
-  enum { NumExprBits = NumStmtBits + 5 + llvm::BitWidth<ExprDependence> };
+  enum { NumExprBits = NumStmtBits + 6 + llvm::BitWidth<ExprDependence> };
 
   class ConstantExprBitfields {
     friend class ASTStmtReader;
@@ -445,8 +448,6 @@ protected:
     unsigned CapturedByCopyInLambdaWithExplicitObjectParameter : 1;
     LLVM_PREFERRED_TYPE(NonOdrUseReason)
     unsigned NonOdrUseReason : 2;
-    LLVM_PREFERRED_TYPE(bool)
-    unsigned IsImmediateEscalating : 1;
 
     /// The location of the declaration name itself.
     SourceLocation Loc;
@@ -460,10 +461,10 @@ protected:
     unsigned : NumExprBits;
 
     static_assert(
-        llvm::APFloat::S_MaxSemantics < 16,
-        "Too many Semantics enum values to fit in bitfield of size 4");
+        llvm::APFloat::S_MaxSemantics < 32,
+        "Too many Semantics enum values to fit in bitfield of size 5");
     LLVM_PREFERRED_TYPE(llvm::APFloat::Semantics)
-    unsigned Semantics : 4; // Provides semantics for APFloat construction
+    unsigned Semantics : 5; // Provides semantics for APFloat construction
     LLVM_PREFERRED_TYPE(bool)
     unsigned IsExact : 1;
   };
@@ -561,8 +562,8 @@ protected:
     LLVM_PREFERRED_TYPE(bool)
     unsigned HasFPFeatures : 1;
 
-    /// Padding used to align OffsetToTrailingObjects to a byte multiple.
-    unsigned : 24 - 3 - NumExprBits;
+    /// True if the call expression is a must-elide call to a coroutine.
+    unsigned IsCoroElideSafe : 1;
 
     /// The offset in bytes from the this pointer to the start of the
     /// trailing objects belonging to CallExpr. Intentionally byte sized
@@ -583,11 +584,13 @@ protected:
     unsigned IsArrow : 1;
 
     /// True if this member expression used a nested-name-specifier to
-    /// refer to the member, e.g., "x->Base::f", or found its member via
-    /// a using declaration.  When true, a MemberExprNameQualifier
-    /// structure is allocated immediately after the MemberExpr.
+    /// refer to the member, e.g., "x->Base::f".
     LLVM_PREFERRED_TYPE(bool)
-    unsigned HasQualifierOrFoundDecl : 1;
+    unsigned HasQualifier : 1;
+
+    // True if this member expression found its member via a using declaration.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned HasFoundDecl : 1;
 
     /// True if this member expression specified a template keyword
     /// and/or a template argument list explicitly, e.g., x->f<int>,
@@ -648,6 +651,11 @@ protected:
     LLVM_PREFERRED_TYPE(bool)
     unsigned HasFPFeatures : 1;
 
+    /// Whether or not this BinaryOperator should be excluded from integer
+    /// overflow sanitization.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned ExcludedOverflowPattern : 1;
+
     SourceLocation OpLoc;
   };
 
@@ -707,6 +715,18 @@ protected:
     /// Ex. __builtin_LINE, __builtin_FUNCTION, etc.
     LLVM_PREFERRED_TYPE(SourceLocIdentKind)
     unsigned Kind : 3;
+  };
+
+  class ParenExprBitfields {
+    friend class ASTStmtReader;
+    friend class ASTStmtWriter;
+    friend class ParenExpr;
+
+    LLVM_PREFERRED_TYPE(ExprBitfields)
+    unsigned : NumExprBits;
+
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned ProducedByFoldExpansion : 1;
   };
 
   class StmtExprBitfields {
@@ -781,6 +801,11 @@ protected:
     /// Whether this is an implicit "this".
     LLVM_PREFERRED_TYPE(bool)
     unsigned IsImplicit : 1;
+
+    /// Whether there is a lambda with an explicit object parameter that
+    /// captures this "this" by copy.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned CapturedByCopyInLambdaWithExplicitObjectParameter : 1;
 
     /// The location of the "this".
     SourceLocation Loc;
@@ -970,8 +995,6 @@ protected:
     unsigned ZeroInitialization : 1;
     LLVM_PREFERRED_TYPE(CXXConstructionKind)
     unsigned ConstructionKind : 3;
-    LLVM_PREFERRED_TYPE(bool)
-    unsigned IsImmediateEscalating : 1;
 
     SourceLocation Loc;
   };
@@ -1060,11 +1083,6 @@ protected:
     /// argument-dependent lookup if this is the operand of a function call.
     LLVM_PREFERRED_TYPE(bool)
     unsigned RequiresADL : 1;
-
-    /// True if these lookup results are overloaded.  This is pretty trivially
-    /// rederivable if we urgently need to kill this field.
-    LLVM_PREFERRED_TYPE(bool)
-    unsigned Overloaded : 1;
   };
   static_assert(sizeof(UnresolvedLookupExprBitfields) <= 4,
                 "UnresolvedLookupExprBitfields must be <= than 4 bytes to"
@@ -1163,6 +1181,21 @@ protected:
     unsigned IsImplicit : 1;
   };
 
+  //===--- C++26 Reflect Expression bitfields classes ---===//
+
+  class CXXSpliceExprBitfields {
+    friend class ASTStmtReader;
+    friend class CXXSpliceExpr;
+
+    LLVM_PREFERRED_TYPE(ExprBitfields)
+    unsigned : NumExprBits;
+
+    /// Whether the name includes info for explicit template
+    /// keyword and arguments.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned HasTemplateKWAndArgsInfo : 1;
+  };
+
   //===--- Obj-C Expression bitfields classes ---===//
 
   class ObjCIndirectCopyRestoreExprBitfields {
@@ -1231,6 +1264,7 @@ protected:
     GenericSelectionExprBitfields GenericSelectionExprBits;
     PseudoObjectExprBitfields PseudoObjectExprBits;
     SourceLocExprBitfields SourceLocExprBits;
+    ParenExprBitfields ParenExprBits;
 
     // GNU Extensions.
     StmtExprBitfields StmtExprBits;
@@ -1263,6 +1297,9 @@ protected:
 
     // C++ Coroutines expressions
     CoawaitExprBitfields CoawaitBits;
+
+    // C++ Reflection expressions
+    CXXSpliceExprBitfields CXXSpliceExprBits;
 
     // Obj-C Expressions
     ObjCIndirectCopyRestoreExprBitfields ObjCIndirectCopyRestoreExprBits;
@@ -1654,6 +1691,11 @@ public:
   FPOptionsOverride getStoredFPFeatures() const {
     assert(hasStoredFPFeatures());
     return *getTrailingObjects<FPOptionsOverride>();
+  }
+
+  /// Get the store FPOptionsOverride or default if not stored.
+  FPOptionsOverride getStoredFPFeaturesOrDefault() const {
+    return hasStoredFPFeatures() ? getStoredFPFeatures() : FPOptionsOverride();
   }
 
   using body_iterator = Stmt **;
