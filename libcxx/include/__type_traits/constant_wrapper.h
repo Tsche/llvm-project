@@ -269,7 +269,7 @@ struct constant_wrapper : __cw_operators {
     return {};
   }
 
-  constexpr operator decltype(auto)() const noexcept { return value; }
+  constexpr operator decltype(value)() const noexcept { return value; }
 };
 
 template <__cw_fixed_value _Val>
