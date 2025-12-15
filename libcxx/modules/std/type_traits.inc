@@ -15,6 +15,12 @@ export namespace std {
   using std::false_type;
   using std::true_type;
 
+#if _LIBCPP_STD_VER >= 26
+  // [const.wrap.class], class template constant_wrapper
+  using std::constant_wrapper;
+  using std::cw;
+#endif
+
   // [meta.unary.cat], primary type categories
   using std::is_array;
   using std::is_class;

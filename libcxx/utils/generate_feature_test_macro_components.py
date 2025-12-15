@@ -335,6 +335,11 @@ feature_test_macros = [
             "headers": ["concepts"],
         },
         {
+            "name": "__cpp_lib_constant_wrapper",
+            "values": {"c++26": 202506},  # P2781R9 std::constant_wrapper
+            "headers": ["type_traits"],
+        },
+        {
             "name": "__cpp_lib_constexpr_algorithms",
             "values": {
                 "c++20": 201806,

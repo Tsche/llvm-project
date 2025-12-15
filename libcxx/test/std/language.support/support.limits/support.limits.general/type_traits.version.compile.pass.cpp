@@ -32,6 +32,10 @@
 #    error "__cpp_lib_common_reference should not be defined before c++20"
 #  endif
 
+#  ifdef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should not be defined before c++26"
+#  endif
+
 #  ifdef __cpp_lib_has_unique_object_representations
 #    error "__cpp_lib_has_unique_object_representations should not be defined before c++17"
 #  endif
@@ -136,6 +140,10 @@
 
 #  ifdef __cpp_lib_common_reference
 #    error "__cpp_lib_common_reference should not be defined before c++20"
+#  endif
+
+#  ifdef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should not be defined before c++26"
 #  endif
 
 #  ifdef __cpp_lib_has_unique_object_representations
@@ -260,6 +268,10 @@
 
 #  ifdef __cpp_lib_common_reference
 #    error "__cpp_lib_common_reference should not be defined before c++20"
+#  endif
+
+#  ifdef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should not be defined before c++26"
 #  endif
 
 #  ifndef __cpp_lib_has_unique_object_representations
@@ -411,6 +423,10 @@
 #  endif
 #  if __cpp_lib_common_reference != 202302L
 #    error "__cpp_lib_common_reference should have the value 202302L in c++20"
+#  endif
+
+#  ifdef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should not be defined before c++26"
 #  endif
 
 #  ifndef __cpp_lib_has_unique_object_representations
@@ -592,6 +608,10 @@
 #  endif
 #  if __cpp_lib_common_reference != 202302L
 #    error "__cpp_lib_common_reference should have the value 202302L in c++23"
+#  endif
+
+#  ifdef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should not be defined before c++26"
 #  endif
 
 #  ifndef __cpp_lib_has_unique_object_representations
@@ -794,6 +814,13 @@
 #  endif
 #  if __cpp_lib_common_reference != 202302L
 #    error "__cpp_lib_common_reference should have the value 202302L in c++26"
+#  endif
+
+#  ifndef __cpp_lib_constant_wrapper
+#    error "__cpp_lib_constant_wrapper should be defined in c++26"
+#  endif
+#  if __cpp_lib_constant_wrapper != 202506L
+#    error "__cpp_lib_constant_wrapper should have the value 202506L in c++26"
 #  endif
 
 #  ifndef __cpp_lib_has_unique_object_representations
