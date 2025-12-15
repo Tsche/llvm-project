@@ -31,7 +31,8 @@ struct __cw_fixed_value<_Tp[_Extent]> {
   using type = _Tp[_Extent];
   _Tp __data[_Extent];
 
-  constexpr __cw_fixed_value(_Tp (&__arr)[_Extent]) noexcept : __cw_fixed_value(__arr, make_index_sequence<_Extent>()) {}
+  constexpr __cw_fixed_value(_Tp (&__arr)[_Extent]) noexcept
+      : __cw_fixed_value(__arr, make_index_sequence<_Extent>()) {}
 
 private:
   template <size_t... _Idx>
@@ -194,132 +195,66 @@ struct __cw_operators {
 
   // pseudo-mutators
   template <__constexpr_param _Tp>
-  constexpr auto operator++(this _Tp) noexcept
-    requires requires(_Tp::value_type __x) { ++__x; }
-  {
-    return constant_wrapper<[] {
-      auto __c = _Tp::value;
-      return ++__c;
-    }()>{};
+  constexpr auto operator++(this _Tp) noexcept -> constant_wrapper<++_Tp::value> {
+    return {};
+  }
+
+  template <__constexpr_param _Tp>
+  constexpr auto operator++(this _Tp, int) noexcept -> constant_wrapper<_Tp::value++> {
+    return {};
+  }
+
+  template <__constexpr_param _Tp>
+  constexpr auto operator--(this _Tp) noexcept -> constant_wrapper<--_Tp::value> {
+    return {};
   }
   template <__constexpr_param _Tp>
-  constexpr auto operator++(this _Tp, int) noexcept
-    requires requires(_Tp::value_type __x) { __x++; }
-  {
-    return constant_wrapper<[] {
-      auto __c = _Tp::value;
-      return __c++;
-    }()>{};
-  }
-  template <__constexpr_param _Tp>
-  constexpr auto operator--(this _Tp) noexcept
-    requires requires(_Tp::value_type __x) { --__x; }
-  {
-    return constant_wrapper<[] {
-      auto __c = _Tp::value;
-      return --__c;
-    }()>{};
-  }
-  template <__constexpr_param _Tp>
-  constexpr auto operator--(this _Tp, int) noexcept
-    requires requires(_Tp::value_type __x) { __x--; }
-  {
-    return constant_wrapper<[] {
-      auto __c = _Tp::value;
-      return __c--;
-    }()>{};
+  constexpr auto operator--(this _Tp, int) noexcept -> constant_wrapper<_Tp::value--> {
+    return {};
   }
 
   template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator+=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x += _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v += _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator-=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x -= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v -= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator*=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x *= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v *= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator/=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x /= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v /= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator%=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x %= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v %= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator&=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x &= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v &= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator|=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x |= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v |= _Rhs::value;
-    }()>{};
-  }
-  template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator^=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x ^= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v ^= _Rhs::value;
-    }()>{};
+  constexpr auto operator+=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value += _Rhs::value)> {
+    return {};
   }
 
   template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator<<=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x <<= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v <<= _Rhs::value;
-    }()>{};
+  constexpr auto operator-=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value -= _Rhs::value)> {
+    return {};
+  }
+
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator*=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value *= _Rhs::value)> {
+    return {};
   }
   template <__constexpr_param _Tp, __constexpr_param _Rhs>
-  constexpr auto operator>>=(this _Tp, _Rhs) noexcept
-    requires requires(_Tp::value_type __x) { __x >>= _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v = _Tp::value;
-      return __v >>= _Rhs::value;
-    }()>{};
+  constexpr auto operator/=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value /= _Rhs::value)> {
+    return {};
+  }
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator%=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value %= _Rhs::value)> {
+    return {};
+  }
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator&=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value &= _Rhs::value)> {
+    return {};
+  }
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator|=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value |= _Rhs::value)> {
+    return {};
+  }
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator^=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value ^= _Rhs::value)> {
+    return {};
+  }
+
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator<<=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value <<= _Rhs::value)> {
+    return {};
+  }
+  template <__constexpr_param _Tp, __constexpr_param _Rhs>
+  constexpr auto operator>>=(this _Tp, _Rhs) noexcept -> constant_wrapper<(_Tp::value >>= _Rhs::value)> {
+    return {};
   }
 };
 
@@ -330,13 +265,8 @@ struct constant_wrapper : __cw_operators {
   using value_type                   = typename decltype(_Val)::type;
 
   template <__constexpr_param _Rhs>
-  constexpr auto operator=(_Rhs) const noexcept
-    requires requires(value_type __x) { __x = _Rhs::value; }
-  {
-    return constant_wrapper<[] {
-      auto __v   = value;
-      return __v = _Rhs::value;
-    }()>{};
+  constexpr auto operator=(_Rhs) const noexcept -> constant_wrapper<(_Val = _Rhs::value)> {
+    return {};
   }
 
   constexpr operator decltype(auto)() const noexcept { return value; }
