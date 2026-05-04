@@ -20,6 +20,11 @@
 #include <cassert>
 #include <utility>
 
+template <auto _I>
+constexpr auto inc() {
+  return _I + 1;
+}
+
 constexpr bool test() {
   auto [elt0, elt1, elt2, elt3] = std::make_index_sequence<4>();
 
@@ -28,21 +33,20 @@ constexpr bool test() {
   assert(elt2 == 2);
   assert(elt3 == 3);
 
-// TODO: remove this macro guard once GCC16 is available
-#if __cpp_structured_bindings >= 202411L
   []<typename...> {
-    auto [... empty] = std::make_index_sequence<0>();
+    constexpr auto [... empty] = std::make_index_sequence<0>();
     static_assert(sizeof...(empty) == 0);
 
-    auto [... size4] = std::make_index_sequence<4>();
+    constexpr auto [... size4] = std::make_index_sequence<4>();
     static_assert(sizeof...(size4) == 4);
 
-    assert(size4...[0] == 0);
-    assert(size4...[1] == 1);
-    assert(size4...[2] == 2);
-    assert(size4...[3] == 3);
+    static_assert(size4...[0] == 0);
+    static_assert(size4...[1] == 1);
+    static_assert(size4...[2] == 2);
+    static_assert(size4...[3] == 3);
+
+    static_assert((inc<size4>() + ... + 0) == 10);
   }();
-#endif
 
   return true;
 }
