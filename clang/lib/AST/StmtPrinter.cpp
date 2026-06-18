@@ -1850,12 +1850,8 @@ void StmtPrinter::VisitCStyleCastExpr(CStyleCastExpr *Node) {
     const auto *ED = T->getAsEnumDecl();
     if (IL && ED) {
       llvm::APInt Val = IL->getValue();
-      for (const EnumConstantDecl *ECD : ED->enumerators()) {
-        if (llvm::APInt::isSameValue(ECD->getInitVal(), Val)) {
-          ECD->printQualifiedName(OS, Policy);
-          return;
-        }
-      }
+      ED->prettyPrint(Val, OS, Policy);
+      return;
     }
   }
   OS << '(';

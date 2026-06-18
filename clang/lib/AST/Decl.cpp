@@ -51,6 +51,7 @@
 #include "clang/Basic/TargetCXXABI.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Visibility.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
@@ -5193,6 +5194,101 @@ void EnumDecl::getValueRange(llvm::APInt &Max, llvm::APInt &Min) const {
     Max = llvm::APInt(Bitwidth, 1) << NumPositiveBits;
     Min = llvm::APInt::getZero(Bitwidth);
   }
+}
+
+static bool tryPrintFlagEnum(const EnumDecl &ED, llvm::APInt Val,
+                             raw_ostream &OS, const PrintingPolicy &Policy) {
+  struct Entry {
+    llvm::APInt Value;
+    const EnumConstantDecl *ECD;
+  };
+
+  const unsigned NumBits = ED.getNumNegativeBits() + ED.getNumPositiveBits();
+  SmallVector<Entry, 8> Entries;
+  Entries.reserve(std::distance(ED.enumerator_begin(), ED.enumerator_end()));
+
+  for (const EnumConstantDecl *ECD : ED.enumerators()) {
+    llvm::APSInt IV = ECD->getInitVal();
+    llvm::APInt V = llvm::APInt(IV).zextOrTrunc(NumBits);
+
+    // exact match wins immediately
+    if (llvm::APInt::isSameValue(V, Val)) {
+      ECD->printQualifiedName(OS, Policy);
+      return true;
+    }
+
+    Entries.push_back({V, ECD});
+  }
+
+  if (Entries.empty())
+    return false;
+
+  llvm::APInt Remaining = Val.zextOrTrunc(NumBits);
+  SmallVector<unsigned, 8> Sorted;
+  Sorted.reserve(Entries.size());
+  for (unsigned i = 0; i != Entries.size(); ++i)
+    Sorted.push_back(i);
+
+  llvm::sort(Sorted, [&](unsigned L, unsigned R) {
+    if (Entries[L].Value != Entries[R].Value)
+      return Entries[L].Value.ugt(Entries[R].Value);
+    return L < R;
+  });
+
+  SmallVector<unsigned, 8> Selected;
+  for (unsigned I : Sorted) {
+    const auto &E = Entries[I];
+    if (E.Value == 0)
+      continue;
+
+    if ((Remaining & E.Value) != E.Value)
+      continue;
+
+    Remaining &= ~E.Value;
+    Selected.push_back(I);
+
+    if (Remaining == 0)
+      break;
+  }
+
+  llvm::sort(Selected, [](unsigned L, unsigned R) { return L < R; });
+
+  if (!ED.isScoped()) {
+    OS << '(';
+    ED.printQualifiedName(OS);
+    OS << ")";
+  }
+
+  OS << "(";
+  for (unsigned i = 0; i != Selected.size(); ++i) {
+    if (i)
+      OS << " | ";
+    Entries[Selected[i]].ECD->printQualifiedName(OS, Policy);
+  }
+
+  OS << ')';
+  return true;
+}
+
+void EnumDecl::prettyPrint(llvm::APInt Val, raw_ostream &OS,
+                           const PrintingPolicy &Policy) const {
+  if (isClosedFlag()) {
+    if (tryPrintFlagEnum(*this, Val, OS, Policy))
+      return;
+  } else {
+    for (const EnumConstantDecl *ECD : enumerators()) {
+      if (llvm::APInt::isSameValue(ECD->getInitVal(), Val)) {
+        ECD->printQualifiedName(OS, Policy);
+        return;
+      }
+    }
+  }
+
+  // fallback: print as C-style cast
+  OS << '(';
+  printQualifiedName(OS, Policy);
+  OS << ')';
+  Val.print(OS, getIntegerType()->isSignedIntegerType());
 }
 
 //===----------------------------------------------------------------------===//

@@ -4313,6 +4313,9 @@ public:
     setInstantiationOfMemberEnum(getASTContext(), ED, TSK);
   }
 
+  void prettyPrint(llvm::APInt Val, raw_ostream &OS,
+                   const PrintingPolicy &Policy) const;
+
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == Enum; }
 };

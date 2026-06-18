@@ -57,16 +57,8 @@ static void printIntegral(const TemplateArgument &TemplArg, raw_ostream &Out,
 
   if (Policy.UseEnumerators) {
     if (const auto *ED = T->getAsEnumDecl()) {
-      for (const EnumConstantDecl *ECD : ED->enumerators()) {
-        // In Sema::CheckTemplateArugment, enum template arguments value are
-        // extended to the size of the integer underlying the enum type.  This
-        // may create a size difference between the enum value and template
-        // argument value, requiring isSameValue here instead of operator==.
-        if (llvm::APSInt::isSameValue(ECD->getInitVal(), Val)) {
-          ECD->printQualifiedName(Out, Policy);
-          return;
-        }
-      }
+      ED->prettyPrint(Val, Out, Policy);
+      return;
     }
   }
 
@@ -122,13 +114,16 @@ static void printIntegral(const TemplateArgument &TemplArg, raw_ostream &Out,
         Out << Val;
         break;
       default:
+        llvm::errs() << "printIntegral default\n";
         Out << "(" << T->getCanonicalTypeInternal().getAsString(Policy) << ")"
             << Val;
         break;
       }
-    } else
+    } else {
+      llvm::errs() << "printIntegral final else\n";
       Out << "(" << T->getCanonicalTypeInternal().getAsString(Policy) << ")"
           << Val;
+    }
   } else
     Out << Val;
 }
